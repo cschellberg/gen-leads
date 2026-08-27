@@ -1,0 +1,10 @@
+# Environment variables
+.env*
+
+# IntelliJ / JetBrains
+.idea/
+*.iml
+
+# Python
+__pycache__/
+*.pyc

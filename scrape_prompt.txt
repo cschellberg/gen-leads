@@ -1,0 +1,12 @@
+Scrape pages 11 to 20 of this LinkedIn company search:
+
+https://www.linkedin.com/search/results/companies/?keywords=NOT%20Staffing%20NOT%20Recruiting%20NOT%20Education&origin=GLOBAL_SEARCH_HEADER&companyHqGeo=%5B%22104937023%22%5D&companySize=%5B%22B%22%2C%22C%22%2C%22D%22%5D
+
+For each page in that range (append &page=N to the URL), fetch the page's
+text via the browser tool. Concatenate all the pages' text together in
+order, then call linkedin_import.ingest_linkedin_page_text() in gen-leads/
+ONCE on the combined text, with from_page=11 and to_page=20 and url=the
+search URL above -- this parses every company across all the pages, adds
+any new ones to the leads table as unprocessed, and logs exactly one
+Lead_Runs row for the whole 11-20 range (calling it once per page instead
+would log 10 separate single-page rows rather than one range).

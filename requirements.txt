@@ -1,0 +1,10 @@
+langchain
+langchain-openai
+langchain_community
+langchain_anthropic
+dotenv
+langchain-google-genai
+langchain-tavily
+sqlalchemy
+tokenizers
+dnspython
