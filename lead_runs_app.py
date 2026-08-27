@@ -46,6 +46,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db import DEFAULT_DB, Lead, LeadRun, get_engine  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
+class _QueueWriter:
+    """File-like object that buffers writes into complete lines and puts each
+    one on a queue -- used to redirect stdout/stderr from the worker thread
+    into the status box, since print() output has nowhere else to go once
+    it's running inside the GUI process.
+    """
+
+    def __init__(self, q: "queue.Queue[str]"):
+        self.queue = q
+        self.buffer = ""
+
+    def write(self, s: str):
+        self.buffer += s
+        while "\n" in self.buffer:
+            line, self.buffer = self.buffer.split("\n", 1)
+            if line:
+                self.queue.put(line)
+
+    def flush(self):
+        pass
+
+
 DEFAULT_SEARCH_URL = (
     "https://www.linkedin.com/search/results/companies/?keywords=NOT%20Staffing%20NOT%20Recruiting"
     "%20NOT%20Education&origin=GLOBAL_SEARCH_HEADER&companyHqGeo=%5B%22104937023%22%5D&companySize="
@@ -281,12 +303,20 @@ class LeadRunsApp:
         self.root.after(100, self._poll_process_queue)
 
     def _process_worker(self, limit, make_llm, process_unprocessed_leads):
-        from langchain_tavily import TavilySearch
-
         def on_progress(i, total, lead):
             self.process_queue.put(f"[{i}/{total}] {lead.name}")
 
+        # process_company() and friends in lead_gen.py print per-lead detail
+        # (website/contact/email status, failures) straight to stdout/stderr
+        # rather than going through on_progress. Redirect both here so that
+        # output ends up in the status box instead of a console the GUI
+        # process may not even have attached.
+        redirected = _QueueWriter(self.process_queue)
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = redirected, redirected
         try:
+            from langchain_tavily import TavilySearch
+
             search = TavilySearch(max_results=5, search_depth="basic")
             extract_llm = make_llm(temperature=0)
             write_llm = make_llm(temperature=0.6)
@@ -295,8 +325,15 @@ class LeadRunsApp:
                     session, search, extract_llm, write_llm, limit=limit, sleep_seconds=1.0, on_progress=on_progress
                 )
             self.process_queue.put(f"__DONE__:{done}")
-        except Exception as e:
+        except BaseException as e:
+            # BaseException, not Exception -- make_llm() raises SystemExit
+            # (via sys.exit()) when an API key is missing/placeholder, which
+            # Exception doesn't catch. Left uncaught, the thread would die
+            # silently with nothing ever posted to the queue, leaving the
+            # status box stuck on "Starting..." forever with no error shown.
             self.process_queue.put(f"__ERROR__:{e}")
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
 
     def _poll_process_queue(self):
         try:

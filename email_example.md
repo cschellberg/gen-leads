@@ -4,7 +4,7 @@ I came across **{Company Name}** and was impressed by {specific detail pulled fr
 
 We're a small, US-based team offering:
 
-- **Full-stack development** — Java, Spring, Node.js, AWS, Kubernetes
+- **Full-stack development** — Java, Python, Spring, Node.js, and AWS
 - **Cloud migrations & serverless architecture** built to scale without a rewrite
 - **Graphic & UX design** to match
 - **Ongoing post-launch support** — we don't disappear after hand-off

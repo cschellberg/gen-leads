@@ -2,9 +2,12 @@ langchain
 langchain-openai
 langchain_community
 langchain_anthropic
+langchain-core
 dotenv
 langchain-google-genai
 langchain-tavily
 sqlalchemy
 tokenizers
 dnspython
+typing-extensions
+pydantic

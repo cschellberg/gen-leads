@@ -93,7 +93,7 @@ development and design shop. Positioning: "Delivering smart, efficient \
 solutions that are easy to understand, scale, and support, long after \
 launch" -- built to avoid the over-engineered, bloated software that's hard \
 to maintain. Led by a Senior Software Engineer/Architect with 24+ years of \
-hands-on experience. Stack: Java, Spring, Node.js, AWS, Kubernetes, \
+hands-on experience. Stack: Java, Python, Spring, Node.js, AWS, Kubernetes, \
 serverless architectures, and cloud migrations. Also does graphic/UX design. \
 Differentiators: custom-tailored architecture (not off-the-shelf), designed \
 to handle traffic growth without re-engineering, and ongoing post-launch \
