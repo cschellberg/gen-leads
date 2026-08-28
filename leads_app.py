@@ -34,10 +34,12 @@ import smtplib
 import sys
 import threading
 from datetime import datetime
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
 import boto3
+import markdown
 
 # On some Windows venvs, tkinter's default Tcl/Tk search path doesn't match
 # the python.org installer layout (<base>/tcl/tcl8.6, not <base>/lib/tcl8.6),
@@ -85,8 +87,24 @@ TABLE_WIDTH = sum(width for _, _, width in COLS) + BUTTON_AREA_WIDTH  # full (sc
 VIEWPORT_WIDTH = 1300  # visible width; wider tables scroll horizontally instead of growing the window
 
 
+def markdown_body_to_html(body: str) -> str:
+    """Renders a Markdown email body (see email_example.md's style -- bold,
+    bullet lists, and two-trailing-space hard breaks) to a self-contained
+    HTML fragment suitable for a text/html email part.
+    """
+    rendered = markdown.markdown(body, extensions=["extra", "sane_lists"])
+    return (
+        '<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; '
+        'line-height: 1.5; color: #1a1a1a;">\n' + rendered + "\n</div>"
+    )
+
+
 def send_email_via_gmail(to_addr: str, subject: str, body: str) -> None:
     """Sends one email through Gmail SMTP. Raises on failure.
+
+    The body is authored as Markdown; this sends it as a multipart/alternative
+    message so most clients render the formatted HTML version (bold, bullet
+    lists, etc.), with the raw Markdown text kept as the plain-text fallback.
 
     Honors LEADS_GUI_DRY_RUN -- when set, this only prints what it would
     have sent and never opens a network connection.
@@ -105,10 +123,12 @@ def send_email_via_gmail(to_addr: str, subject: str, body: str) -> None:
             "(https://myaccount.google.com/apppasswords) and add it."
         )
 
-    msg = MIMEText(body)
+    msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = SENDER_DISPLAY
     msg["To"] = to_addr
+    msg.attach(MIMEText(body, "plain"))
+    msg.attach(MIMEText(markdown_body_to_html(body), "html"))
 
     with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
         server.starttls()

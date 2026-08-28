@@ -12,3 +12,4 @@ dnspython
 typing-extensions
 pydantic
 boto3
+markdown

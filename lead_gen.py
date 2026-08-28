@@ -2,13 +2,18 @@
 Lead-enrichment pipeline for Succinct Solutions ("Process" in the standalone
 app). For every lead in the database with processed=False -- added by
 linkedin_import.py after a scrape, from any other source -- this:
-  1. Searches the web (Tavily) to find the company's official website.
+  1. Searches the web (Tavily) to find the company's official website --
+     stored as just the homepage (scheme + domain), never a subpage.
   2. Searches for a named technical decision-maker (CTO / VP Eng / Director of
-     IT / Head of Technology) and their email. Falls back to a general
-     inquiry contact (a generic info@/contact@ address, or a "Contact Us"
-     page URL) found via search when no named contact can be confirmed.
-     Nothing is ever guessed or invented -- only facts that literally appear
-     in the search results are used.
+     IT / Head of Technology) and their email. If a real email is confirmed
+     in search results, that's used verbatim. If only the person's name is
+     found (no email), every plausible email permutation of their name at
+     the company's domain is generated (first.last@, flast@, etc.) and
+     stored as a comma-separated list -- these are guesses, not confirmed
+     addresses, so review before relying on any single one. Falls back to a
+     generic info@/contact@ address found via search when no named contact
+     can be confirmed. The email field is always in standard email-address
+     form -- never a "Contact Us" page URL.
   3. Scores the company 1-10 on how likely it is to need Succinct Solutions'
      services (full-stack dev + graphic design, 1099 contract work).
   4. Drafts a short, tailored cold-outreach email (subject + Markdown-formatted
@@ -146,11 +151,6 @@ class ContactInfo(BaseModel):
         "contact@, hello@) ONLY if it appears verbatim in the search "
         "results. Never invent one.",
     )
-    contact_page_url: Optional[str] = Field(
-        None,
-        description="URL of a 'Contact Us', 'About', or team page from the "
-        "search results, as a last-resort fallback if no email was found.",
-    )
 
 
 class LeadAssessment(BaseModel):
@@ -190,6 +190,11 @@ def make_llm(temperature: float) -> ChatOpenAI:
 
 
 def find_website(search: TavilySearch, company: dict) -> tuple[Optional[str], Optional[str]]:
+    """Returns (homepage_url, bare_domain). The homepage URL is always just
+    scheme + host -- e.g. a search result of https://acme.com/contact-us
+    becomes https://acme.com -- never a subpage, since the stored website
+    should be the company's front door, not whatever page happened to rank.
+    """
     query = f"{company['company name']} {company['city']} {company['state']} official website"
     try:
         result = search.invoke({"query": query})
@@ -198,11 +203,38 @@ def find_website(search: TavilySearch, company: dict) -> tuple[Optional[str], Op
         return None, None
     for r in result.get("results", []):
         url = r.get("url", "")
-        domain = urllib.parse.urlparse(url).netloc.lower().removeprefix("www.")
+        parsed = urllib.parse.urlparse(url)
+        domain = parsed.netloc.lower().removeprefix("www.")
         is_blocked = any(domain == d or domain.endswith("." + d) for d in NON_OFFICIAL_DOMAINS)
-        if domain and not is_blocked:
-            return url, domain
+        if domain and parsed.scheme in ("http", "https") and not is_blocked:
+            return f"{parsed.scheme}://{parsed.netloc}", domain
     return None, None
+
+
+def generate_email_permutations(full_name: str, domain: str) -> list[str]:
+    """Every plausible corporate email pattern for a person's name at a
+    given domain (first.last@, flast@, etc.) -- used as a fallback guess
+    list when a name is known but no real email was found in search
+    results. These are guesses, never confirmed addresses.
+    """
+    tokens = re.findall(r"[A-Za-z]+", full_name)
+    if len(tokens) < 2:
+        if tokens:
+            return [f"{tokens[0].lower()}@{domain}"]
+        return []
+    first, last = tokens[0].lower(), tokens[-1].lower()
+    f, l = first[0], last[0]
+    candidates = [
+        f"{first}.{last}@{domain}",
+        f"{first}{last}@{domain}",
+        f"{first}_{last}@{domain}",
+        f"{first}-{last}@{domain}",
+        f"{f}{last}@{domain}",
+        f"{last}.{first}@{domain}",
+        f"{last}{f}@{domain}",
+        f"{first}@{domain}",
+    ]
+    return list(dict.fromkeys(candidates))  # de-dupe, preserve order
 
 
 def gather_contact_snippets(search: TavilySearch, company: dict, domain: Optional[str]) -> str:
@@ -238,9 +270,8 @@ def extract_contact(extract_llm: ChatOpenAI, company: dict, snippets: str) -> Co
         f"Company: {company['company name']} ({company['city']}, {company['state']})\n\n"
         "Below are web search results about this company. Extract a technical "
         "decision-maker's name/title/email if explicitly present, otherwise a "
-        "generic company email, otherwise a contact page URL. Only use facts "
-        "that literally appear below -- never guess or construct an email "
-        "address.\n\nSEARCH RESULTS:\n" + snippets
+        "generic company email. Only use facts that literally appear below -- "
+        "never guess or construct an email address.\n\nSEARCH RESULTS:\n" + snippets
     )
     try:
         return structured.invoke(prompt)
@@ -343,7 +374,13 @@ def process_company(
     website, domain = find_website(search, company)
     snippets = gather_contact_snippets(search, company, domain)
     contact = extract_contact(extract_llm, company, snippets)
-    email = contact.contact_email or contact.generic_email or contact.contact_page_url or ""
+
+    if contact.contact_email:
+        email = contact.contact_email
+    elif contact.contact_name and domain:
+        email = ", ".join(generate_email_permutations(contact.contact_name, domain))
+    else:
+        email = contact.generic_email or ""
 
     assessment = draft_email(write_llm, company, website, contact)
 
