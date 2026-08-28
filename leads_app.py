@@ -33,8 +33,11 @@ import queue
 import smtplib
 import sys
 import threading
+from datetime import datetime
 from email.mime.text import MIMEText
 from pathlib import Path
+
+import boto3
 
 # On some Windows venvs, tkinter's default Tcl/Tk search path doesn't match
 # the python.org installer layout (<base>/tcl/tcl8.6, not <base>/lib/tcl8.6),
@@ -111,6 +114,21 @@ def send_email_via_gmail(to_addr: str, subject: str, body: str) -> None:
         server.starttls()
         server.login(SENDER_EMAIL, app_password)
         server.sendmail(SENDER_EMAIL, [to_addr], msg.as_string())
+
+
+def backup_db_to_s3() -> str:
+    """Uploads leads.db to the S3 bucket named by the S3_BUCKET env var, as
+    leads<yyyyMMdd>.db. Returns the S3 key uploaded to. Raises on failure.
+    """
+    bucket = os.environ.get("S3_BUCKET")
+    if not bucket:
+        raise RuntimeError("S3_BUCKET is not set in .env.")
+    if not os.path.exists(DEFAULT_DB):
+        raise RuntimeError(f"Database file not found: {DEFAULT_DB}")
+
+    key = f"leads{datetime.now().strftime('%Y%m%d')}.db"
+    boto3.client("s3").upload_file(DEFAULT_DB, bucket, key)
+    return key
 
 
 class ScrollableFrame(ttk.Frame):
@@ -302,6 +320,9 @@ class LeadsApp:
 
         ttk.Button(row2, text="Apply", command=self.refresh).pack(side="left", padx=(12, 0))
 
+        self.backup_btn = ttk.Button(row2, text="Backup DB", command=self._backup_db)
+        self.backup_btn.pack(side="left", padx=(18, 0))
+
         self.count_label = ttk.Label(row2, text="")
         self.count_label.pack(side="left", padx=(18, 0))
         if DRY_RUN:
@@ -463,6 +484,39 @@ class LeadsApp:
             lead.disabled = not lead.disabled
             session.commit()
         self.refresh()
+
+    # ---------- backup ----------
+
+    def _backup_db(self):
+        self.backup_btn.config(state="disabled")
+        self.count_label.config(text="Backing up to S3…")
+        result_queue: "queue.Queue[tuple[bool, str]]" = queue.Queue()
+        threading.Thread(target=self._backup_db_worker, args=(result_queue,), daemon=True).start()
+        self._poll_backup_queue(result_queue)
+
+    @staticmethod
+    def _backup_db_worker(result_queue: "queue.Queue[tuple[bool, str]]"):
+        try:
+            key = backup_db_to_s3()
+            result_queue.put((True, key))
+        except Exception as e:
+            result_queue.put((False, str(e)))
+
+    def _poll_backup_queue(self, result_queue: "queue.Queue[tuple[bool, str]]"):
+        try:
+            ok, message = result_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(100, lambda: self._poll_backup_queue(result_queue))
+            return
+
+        self.backup_btn.config(state="normal")
+        leads = self.load_leads()
+        self.count_label.config(text=f"{len(leads)} companies")
+
+        if ok:
+            messagebox.showinfo("Backup complete", f"Uploaded to S3 as {message}.")
+        else:
+            messagebox.showerror("Backup failed", message)
 
     # ---------- detail panel plumbing ----------
 

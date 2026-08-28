@@ -11,3 +11,4 @@ tokenizers
 dnspython
 typing-extensions
 pydantic
+boto3
