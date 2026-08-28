@@ -35,7 +35,6 @@ python main_app.py            # launcher — opens any of the apps below from an
 python lead_runs_app.py       # log/view scrape coverage; run the enrichment pipeline
 python leads_app.py           # browse, edit, disable leads; send drafted emails
 python verify_email_app.py    # SMTP-based check for whether a mailbox address exists
-python lead_runs_viewer.py    # read-only view of scrape run history
 ```
 
 CLI scripts:

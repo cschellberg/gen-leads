@@ -16,11 +16,10 @@ Python interpreter: the project's actual working interpreter (with all of `requi
 ```
 
 Entry points (each is an independent standalone Tkinter app — see "Architecture" below):
-- `python main_app.py` — launcher with an Apps menu that opens the other three GUI apps (lazy-imported on first open)
+- `python main_app.py` — launcher with an Apps menu that opens the other GUI apps (lazy-imported on first open)
 - `python lead_runs_app.py` — log/view scrape coverage, and run the enrichment pipeline ("Process" button) on unprocessed leads
 - `python leads_app.py` — browse/edit/disable leads and send drafted emails via Gmail SMTP
 - `python verify_email_app.py` — standalone SMTP mailbox-existence probe (GUI wrapper around `verify_email.py`)
-- `python lead_runs_viewer.py` — read-only sortable view of scrape run history
 
 CLI/batch scripts (no GUI):
 - `python lead_gen.py [--db PATH] [--limit N] [--sleep SECONDS]` — runs the enrichment pipeline over every unprocessed lead. `--limit` is for smoke-testing since it makes real Tavily + Gemini API calls per lead.
