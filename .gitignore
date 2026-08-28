@@ -10,3 +10,4 @@ __pycache__/
 *.pyc
 
 leads.db
+regenerate_emails.log
