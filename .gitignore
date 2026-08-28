@@ -1,13 +1,14 @@
 # Environment variables
 .env*
 
-# IntelliJ / JetBrains
+# IntelliJ / JetBrainsgi
 .idea/
 *.iml
 
 # Python
 __pycache__/
 *.pyc
+.venv/
 
 leads.db
 regenerate_emails.log
