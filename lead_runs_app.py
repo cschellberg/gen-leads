@@ -13,9 +13,10 @@ covered?".
 
 "Process" runs lead_gen.py's enrichment pass (website + contact search,
 ranking, drafted email) on every unprocessed lead currently in the
-database. It can take a while and makes real Tavily/Gemini API calls, so it
-runs on a background thread with live progress shown below; an optional
-Limit lets you test on just a few first.
+database. It can take a while and makes real Gemini API calls (web-search-
+grounded lookups plus drafting), so it runs on a background thread with
+live progress shown below; an optional Limit lets you test on just a few
+first.
 
 Run:
     python lead_runs_app.py
@@ -277,19 +278,13 @@ class LeadRunsApp:
                 messagebox.showerror("Invalid limit", "Limit must be a positive whole number, or left blank.")
                 return
 
-        # Imported here, not at module load -- this makes real Tavily/Gemini
-        # API calls at import time (key checks), which shouldn't happen just
+        # Imported here, not at module load -- this makes real Gemini API
+        # calls at import time (key checks), which shouldn't happen just
         # from opening the app, only when Process is actually clicked.
         try:
-            from lead_gen import make_llm, process_unprocessed_leads
+            from lead_gen import make_genai_client, make_llm, process_unprocessed_leads
         except SystemExit as e:
             messagebox.showerror("Configuration error", str(e))
-            return
-
-        if not os.environ.get("TAVILY_API_KEY"):
-            messagebox.showerror(
-                "Configuration error", "TAVILY_API_KEY is not set in .env. Get a free key at https://app.tavily.com."
-            )
             return
 
         self.processing = True
@@ -299,10 +294,12 @@ class LeadRunsApp:
         self.status_text.config(state="disabled")
         self._append_status("Starting...")
 
-        threading.Thread(target=self._process_worker, args=(limit, make_llm, process_unprocessed_leads), daemon=True).start()
+        threading.Thread(
+            target=self._process_worker, args=(limit, make_genai_client, make_llm, process_unprocessed_leads), daemon=True
+        ).start()
         self.root.after(100, self._poll_process_queue)
 
-    def _process_worker(self, limit, make_llm, process_unprocessed_leads):
+    def _process_worker(self, limit, make_genai_client, make_llm, process_unprocessed_leads):
         def on_progress(i, total, lead):
             self.process_queue.put(f"[{i}/{total}] {lead.name}")
 
@@ -315,14 +312,11 @@ class LeadRunsApp:
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout, sys.stderr = redirected, redirected
         try:
-            from langchain_tavily import TavilySearch
-
-            search = TavilySearch(max_results=5, search_depth="basic")
-            extract_llm = make_llm(temperature=0)
+            client = make_genai_client()
             write_llm = make_llm(temperature=0.6)
             with Session(self.engine) as session:
                 done = process_unprocessed_leads(
-                    session, search, extract_llm, write_llm, limit=limit, sleep_seconds=1.0, on_progress=on_progress
+                    session, client, write_llm, limit=limit, sleep_seconds=1.0, on_progress=on_progress
                 )
             self.process_queue.put(f"__DONE__:{done}")
         except BaseException as e:

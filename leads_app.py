@@ -18,6 +18,11 @@ Setup:
   2. Add GMAIL_APP_PASSWORD="<that 16-character password>" to .env
      (in the project root, next to this gen-leads/ folder).
 
+Backup DB button:
+  Uploads leads.db to the S3 bucket named by the S3_BUCKET env var, as
+  leads<yyyyMMdd>.db (relies on AWS credentials being available via boto3's
+  normal credential chain, e.g. ~/.aws/credentials).
+
 Safety / testing:
   Set the environment variable LEADS_GUI_DRY_RUN=1 to make "Send" print the
   email to the console instead of actually sending it (the DB is still
@@ -30,6 +35,7 @@ Run:
 
 import os
 import queue
+import re
 import smtplib
 import sys
 import threading
@@ -59,7 +65,7 @@ from tkinter import messagebox, ttk
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from db import Lead, get_engine, DEFAULT_DB  # noqa: E402
+from db import CATEGORIES, Lead, get_engine, DEFAULT_DB  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 from verify_email import verify_email_smtp  # noqa: E402
 
@@ -75,12 +81,14 @@ COLS = [
     ("name", "Name", 280),
     ("city", "City", 120),
     ("state", "State", 55),
+    ("category", "Category", 170),
     ("ranking", "Rank", 55),
     ("times_contacted", "Contacted", 90),
     ("status", "Status", 70),
     ("website", "Website", 420),
     ("email", "Email", 280),
 ]
+ALL_CATEGORIES_LABEL = "All Categories"
 BUTTON_AREA_WIDTH = 260  # reserved space for the Edit / Send Mail / Disable buttons
 SCROLLBAR_WIDTH = 16  # tk.Scrollbar (not ttk) so this is an exact, known pixel value
 TABLE_WIDTH = sum(width for _, _, width in COLS) + BUTTON_AREA_WIDTH  # full (scrollable) content width
@@ -259,6 +267,7 @@ class LeadsApp:
         self.show_mode = tk.StringVar(value="active")  # "active" = not disabled, "all" = everything
         self.processed_mode = tk.StringVar(value="processed")  # "processed" or "unprocessed"
         self.search_text = tk.StringVar(value="")
+        self.category_filter = tk.StringVar(value=ALL_CATEGORIES_LABEL)
 
         self._build_top_bar()
 
@@ -322,6 +331,17 @@ class LeadsApp:
         )
         processed_rb.pack(side="left", padx=(6, 0))
         unprocessed_rb.pack(side="left", padx=(6, 0))
+
+        ttk.Label(row1, text="Category:").pack(side="left", padx=(18, 0))
+        category_combo = ttk.Combobox(
+            row1,
+            textvariable=self.category_filter,
+            values=[ALL_CATEGORIES_LABEL, *CATEGORIES],
+            state="readonly",
+            width=22,
+        )
+        category_combo.pack(side="left", padx=(6, 0))
+        category_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
 
         row2 = ttk.Frame(bar)
         row2.pack(anchor="center", pady=(6, 0))
@@ -446,6 +466,10 @@ class LeadsApp:
                 # company name only ("phi" matches "Philadelphia Eagles").
                 query = query.filter(Lead.name.ilike(f"%{needle}%"))
 
+            category = self.category_filter.get()
+            if category and category != ALL_CATEGORIES_LABEL:
+                query = query.filter(Lead.category == category)
+
             if self.sort_mode.get() == "ranking":
                 query = query.order_by(Lead.ranking.desc(), Lead.id.asc())
             else:
@@ -487,6 +511,7 @@ class LeadsApp:
             "name": lead.name,
             "city": lead.city,
             "state": lead.state,
+            "category": lead.category,
             "ranking": str(lead.ranking),
             "times_contacted": str(lead.times_contacted),
             "status": "Disabled" if lead.disabled else "Active",
@@ -577,27 +602,35 @@ class LeadsApp:
                 t.grid(row=row_i, column=1, sticky="w", padx=6, pady=4)
                 fields[attr] = t
 
+            def add_combo(row_i, label, attr, values):
+                ttk.Label(panel, text=label).grid(row=row_i, column=0, sticky="ne", padx=6, pady=4)
+                var = tk.StringVar(value=getattr(lead, attr) or "")
+                c = ttk.Combobox(panel, textvariable=var, values=values, width=57)
+                c.grid(row=row_i, column=1, sticky="w", padx=6, pady=4)
+                fields[attr] = var
+
             add_entry(0, "Name", "name")
             add_entry(1, "City", "city", width=25)
             add_entry(2, "State", "state", width=10)
             add_text(3, "Description", "description", height=3)
-            add_entry(4, "Ranking (1-10)", "ranking", width=6)
-            add_entry(5, "Website", "website")
-            add_entry(6, "Email", "email")
-            add_entry(7, "Subject", "subject")
-            add_text(8, "Body", "body", height=6)
-            add_entry(9, "Times contacted", "times_contacted", width=6)
+            add_combo(4, "Category", "category", CATEGORIES)
+            add_entry(5, "Ranking (1-10)", "ranking", width=6)
+            add_entry(6, "Website", "website")
+            add_entry(7, "Email", "email")
+            add_entry(8, "Subject", "subject")
+            add_text(9, "Body", "body", height=6)
+            add_entry(10, "Times contacted", "times_contacted", width=6)
 
-            ttk.Label(panel, text="Disabled").grid(row=10, column=0, sticky="ne", padx=6, pady=4)
+            ttk.Label(panel, text="Disabled").grid(row=11, column=0, sticky="ne", padx=6, pady=4)
             disabled_var = tk.BooleanVar(value=lead.disabled)
-            ttk.Checkbutton(panel, variable=disabled_var).grid(row=10, column=1, sticky="w", padx=6, pady=4)
+            ttk.Checkbutton(panel, variable=disabled_var).grid(row=11, column=1, sticky="w", padx=6, pady=4)
             fields["disabled"] = disabled_var
 
             verify_status = ttk.Label(panel, text="", foreground="#a15c00", wraplength=420, justify="left")
-            verify_status.grid(row=12, column=0, columnspan=2, padx=6)
+            verify_status.grid(row=13, column=0, columnspan=2, padx=6)
 
             btn_row = ttk.Frame(panel)
-            btn_row.grid(row=11, column=0, columnspan=2, pady=10)
+            btn_row.grid(row=12, column=0, columnspan=2, pady=10)
             ttk.Button(btn_row, text="Save", command=lambda: self._save_edit(lead_id, fields)).pack(
                 side="left", padx=6
             )
@@ -631,6 +664,7 @@ class LeadsApp:
             lead.city = fields["city"].get().strip()
             lead.state = fields["state"].get().strip()
             lead.description = fields["description"].get("1.0", "end").strip()
+            lead.category = fields["category"].get().strip()
             lead.ranking = ranking
             lead.website = fields["website"].get().strip()
             lead.email = fields["email"].get().strip()
@@ -649,12 +683,14 @@ class LeadsApp:
             return
 
         verify_btn.config(state="disabled")
+        candidate_count = len([c for c in email.split(",") if c.strip()])
+        note = f" ({candidate_count} candidates)" if candidate_count > 1 else ""
         status_label.config(
-            text=f"Verifying {email} ... this makes a live SMTP connection and can take up to ~10 seconds."
+            text=f"Verifying {email}{note} ... this makes a live SMTP connection and can take up to ~10 seconds."
         )
         result_queue: "queue.Queue[str]" = queue.Queue()
         threading.Thread(target=self._verify_email_worker, args=(email, result_queue), daemon=True).start()
-        self._poll_verify_queue(result_queue, verify_btn, status_label)
+        self._poll_verify_queue(result_queue, verify_btn, status_label, fields["email"])
 
     @staticmethod
     def _verify_email_worker(email: str, result_queue: "queue.Queue[str]"):
@@ -664,11 +700,13 @@ class LeadsApp:
             result = f"Unexpected error: {e}"
         result_queue.put(result)
 
-    def _poll_verify_queue(self, result_queue: "queue.Queue[str]", verify_btn: ttk.Button, status_label: ttk.Label):
+    def _poll_verify_queue(
+        self, result_queue: "queue.Queue[str]", verify_btn: ttk.Button, status_label: ttk.Label, email_entry: tk.Entry
+    ):
         try:
             result = result_queue.get_nowait()
         except queue.Empty:
-            self.root.after(100, lambda: self._poll_verify_queue(result_queue, verify_btn, status_label))
+            self.root.after(100, lambda: self._poll_verify_queue(result_queue, verify_btn, status_label, email_entry))
             return
         # the edit panel may have been closed/replaced while the background
         # SMTP probe was still running -- don't touch widgets that no longer exist.
@@ -676,6 +714,14 @@ class LeadsApp:
             status_label.config(text=result)
         if verify_btn.winfo_exists():
             verify_btn.config(state="normal")
+
+        # verify_email_smtp() returns "Valid: <email> ..." (same format for a
+        # single address or the winner among comma-delimited candidates) --
+        # once one address is confirmed, collapse the field down to just it.
+        match = re.match(r"^Valid: (\S+) ", result)
+        if match and email_entry.winfo_exists():
+            email_entry.delete(0, "end")
+            email_entry.insert(0, match.group(1))
 
     # ---------- send-mail panel ----------
 
