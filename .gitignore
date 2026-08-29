@@ -10,5 +10,5 @@ __pycache__/
 *.pyc
 .venv/
 
-leads.db
+*.db
 regenerate_emails.log

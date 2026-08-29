@@ -12,11 +12,16 @@ This is a single-user local toolkit — there's no test suite, build step, or pa
 
 ## Setup
 
-Requires Python 3.13 and the packages in `requirements.txt`:
+Requires Python 3.13. Create a virtual environment and install the packages in `requirements.txt` into it:
 
 ```
-pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
 ```
+
+Then run any script/app with `.venv\Scripts\python.exe` (or activate the venv first with `.venv\Scripts\Activate.ps1` so plain `python` picks it up).
+
+On a fresh Windows machine with nothing installed yet, `scripts/install.ps1` does all of the above for you (installs Python 3.13 via winget, creates `.venv`, installs `requirements.txt` into it) — right-click it and choose "Run with PowerShell". Safe to re-run any time; once `.venv` exists, re-running only ever touches packages inside it, never the system Python.
 
 Create a `.env` file in the project root with:
 
@@ -36,6 +41,16 @@ To tailor this toolkit to a different business/user, edit these Markdown files i
 - **`decision_maker.md`** — describes who counts as the target contact at a prospect company. Defaults to `a technical decision-maker (CTO, VP of Engineering, Head of Technology, or Director of IT/Engineering)`; if your outreach targets a different function, replace it with something like `a marketing decision-maker (CMO, VP of Marketing, or Director of Marketing)`. Drives what `lead_gen.find_contact()` searches for — write it as a noun phrase that reads naturally after "Search the web for ___ at this company."
 
 All three are loaded once and cached per process — if you edit them while a GUI app or long-running script is already open, restart it to pick up the change. `email_example.md` (Markdown style/structure reference for drafted bodies — tone, section shape, formatting) is also editable but more about *how* things are said than user-specific facts, so it doesn't need to change per user the way the three above do.
+
+Instead of editing these files in place, you can point at different files entirely via `.env` — useful for keeping multiple personas/businesses' customization files side by side and switching between them per run:
+
+```
+OVERVIEW_FILE=...          # default: overview.md
+SIGNATURE_BLOCK_FILE=...   # default: signature_block.md
+DECISION_MAKER_FILE=...    # default: decision_maker.md
+```
+
+A relative path is resolved against the project root (same as the defaults); an absolute path is used as-is. Leave unset to use the defaults.
 
 After changing any of these, run `python regenerate_emails.py` to redraft existing unsent leads' emails with the new wording rather than leaving them stuck with the old one (`decision_maker.md` changes only affect *future* contact lookups — re-run `lead_gen.py` or `fix_website_and_email.py` to re-search existing leads under the new target).
 

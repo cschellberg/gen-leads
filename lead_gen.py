@@ -77,10 +77,27 @@ GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 # Resolved relative to this file (not the current working directory), so the
 # script finds its data whether you run it from here or from the project root.
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def _customization_path(env_var: str, default_filename: str) -> Path:
+    """The path for one of the customization files below -- default
+    (a filename next to this script) unless overridden by env_var (e.g.
+    OVERVIEW_FILE=/some/other/overview.md in .env), same override
+    convention as db.py's DATABASE_NAME. A relative override is resolved
+    against SCRIPT_DIR, not the CWD, so it behaves the same regardless of
+    where a script is invoked from; an absolute override is used as-is.
+    """
+    override = os.environ.get(env_var, "").strip()
+    if not override:
+        return SCRIPT_DIR / default_filename
+    override_path = Path(override)
+    return override_path if override_path.is_absolute() else SCRIPT_DIR / override_path
+
+
 EMAIL_EXAMPLE_PATH = SCRIPT_DIR / "email_example.md"
-SIGNATURE_BLOCK_PATH = SCRIPT_DIR / "signature_block.md"
-OVERVIEW_PATH = SCRIPT_DIR / "overview.md"
-DECISION_MAKER_PATH = SCRIPT_DIR / "decision_maker.md"
+SIGNATURE_BLOCK_PATH = _customization_path("SIGNATURE_BLOCK_FILE", "signature_block.md")
+OVERVIEW_PATH = _customization_path("OVERVIEW_FILE", "overview.md")
+DECISION_MAKER_PATH = _customization_path("DECISION_MAKER_FILE", "decision_maker.md")
 
 _email_example_cache: Optional[str] = None
 _signature_block_cache: Optional[str] = None
@@ -462,10 +479,16 @@ def draft_email(write_llm: ChatOpenAI, company: dict, website: Optional[str], co
         + get_email_example()
         + "\n---"
     )
+    # Fetched before the try below (same reasoning as get_overview_blurb()
+    # and get_email_example() already being outside it, in `human` above) --
+    # a missing signature_block.md is a setup problem, not a per-lead LLM
+    # failure, so it must propagate rather than being caught by the except
+    # below and silently turned into an empty, signature-less "success".
+    signature_block = get_signature_block()
     try:
         result = structured.invoke([("system", BASE_SYSTEM_PROMPT), ("human", human)])
         greeting = build_greeting(contact)
-        result.body = greeting + "\n\n" + normalize_markdown_linebreaks(result.body) + "\n\n" + get_signature_block()
+        result.body = greeting + "\n\n" + normalize_markdown_linebreaks(result.body) + "\n\n" + signature_block
         return result
     except Exception as e:
         print(f"    [email drafting failed: {e}]", file=sys.stderr)
@@ -512,7 +535,17 @@ def process_unprocessed_leads(
 ) -> int:
     """Enriches every lead with processed=False in place (website, email,
     ranking, subject, body) and marks it processed=True -- on success or
-    failure alike, so a permanently-broken lead is never retried forever.
+    per-lead failure alike (a bad search result, a flaky API response,
+    etc.), so a permanently-broken lead is never retried forever.
+
+    The one exception is a missing customization file (overview.md,
+    signature_block.md, decision_maker.md, email_example.md) -- that's a
+    setup problem, not a per-lead one: every remaining lead would fail
+    identically, so this stops the whole run (re-raising FileNotFoundError)
+    rather than silently burning through the queue marking leads
+    processed=True with no real content. The lead being processed when this
+    happens, and everything after it, is left processed=False so a re-run
+    (once the file is in place) picks them back up.
 
     on_progress, if given, is called as on_progress(i, total, lead) before
     each lead is processed -- lets a GUI show live status without this
@@ -535,14 +568,17 @@ def process_unprocessed_leads(
         }
         try:
             row = process_company(client, write_llm, company)
+        except FileNotFoundError:
+            raise
+        except Exception as e:
+            print(f"    [FAILED: {e}]", file=sys.stderr)
+        else:
             lead.ranking = row["ranking"]
             lead.category = row["category"]
             lead.website = row["website"]
             lead.email = row["email"]
             lead.subject = row["subject"]
             lead.body = row["body"]
-        except Exception as e:
-            print(f"    [FAILED: {e}]", file=sys.stderr)
         lead.processed = True
         session.commit()
         time.sleep(sleep_seconds)
@@ -567,9 +603,12 @@ def main() -> None:
     with Session(engine) as session:
         remaining_before = session.query(Lead).filter(Lead.processed.is_(False)).count()
         print(f"{remaining_before} unprocessed leads.")
-        done = process_unprocessed_leads(
-            session, client, write_llm, limit=args.limit, sleep_seconds=args.sleep, on_progress=report
-        )
+        try:
+            done = process_unprocessed_leads(
+                session, client, write_llm, limit=args.limit, sleep_seconds=args.sleep, on_progress=report
+            )
+        except FileNotFoundError as e:
+            sys.exit(f"Stopped: {e}")
         remaining_after = session.query(Lead).filter(Lead.processed.is_(False)).count()
 
     print(f"Done. Processed {done} lead(s). {remaining_after} unprocessed remain in {args.db}.")
