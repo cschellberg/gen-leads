@@ -47,6 +47,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db import DEFAULT_DB, Lead, LeadRun, get_engine  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
+HISTORY_URL_FIELD_WIDTH = 60  # characters -- keeps the row's Copy button on-screen
+
+
 class _QueueWriter:
     """File-like object that buffers writes into complete lines and puts each
     one on a queue -- used to redirect stdout/stderr from the worker thread
@@ -77,19 +80,34 @@ DEFAULT_SEARCH_URL = (
 
 
 class LeadRunsApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Misc, active_profile_id: int | None = None):
         self.root = root
-        self.root.title("Lead Runs")
-        self._center_window(640, 640)
+        # root is a real window (standalone run) or a plain Frame embedded
+        # in main_app.py's content area (normal flow, one consolidated
+        # window) -- only a real window has .title()/.geometry() to set.
+        if isinstance(root, (tk.Tk, tk.Toplevel)):
+            self.root.title("Lead Runs")
+            self._center_window(640, 640)
 
         self.engine = get_engine(DEFAULT_DB)
         self.process_queue: "queue.Queue[str]" = queue.Queue()
         self.processing = False
+        # Which Profile newly-scraped leads get tagged with (embedded into
+        # the Copy Scrape Prompt text) -- set from main_app.py's Profile
+        # dropdown; None means "let ingest fall back to auto-assignment".
+        self.active_profile_id = active_profile_id
 
         self._build_top_bar()
         self._build_log_run_section()
         self._build_history_section()
         self._build_process_section()
+        self.refresh_all()
+
+    def set_active_profile_id(self, profile_id: int | None) -> None:
+        """Called by main_app.py when the Profile dropdown changes while
+        this window is already open, so a later Copy Scrape Prompt uses the
+        newly-selected profile instead of a stale one."""
+        self.active_profile_id = profile_id
 
         self.refresh_all()
 
@@ -169,17 +187,29 @@ class LeadRunsApp:
             return
         url, from_page, to_page = fields
 
+        if self.active_profile_id is not None:
+            profile_clause = (
+                f"and profile_id={self.active_profile_id} "
+                f"(so these new leads are tagged with that Profile's identity)"
+            )
+        else:
+            profile_clause = (
+                "and profile_id left unset (it'll auto-assign to the sole Profile in the "
+                "database if there's exactly one, or need assigning manually in the Profile "
+                "app otherwise)"
+            )
+
         prompt = (
             f"Scrape pages {from_page} to {to_page} of this LinkedIn company search:\n\n"
             f"{url}\n\n"
             f"For each page in that range (append &page=N to the URL), fetch the page's\n"
             f"text via the browser tool. Concatenate all the pages' text together in\n"
             f"order, then call linkedin_import.ingest_linkedin_page_text() in gen-leads/\n"
-            f"ONCE on the combined text, with from_page={from_page} and to_page={to_page} and\n"
-            f"url=the search URL above -- this parses every company across all the pages,\n"
-            f"adds any new ones to the leads table as unprocessed, and logs exactly one\n"
-            f"Lead_Runs row for the whole {from_page}-{to_page} range (calling it once per\n"
-            f"page instead would log separate single-page rows rather than one range)."
+            f"ONCE on the combined text, with from_page={from_page} and to_page={to_page},\n"
+            f"url=the search URL above, {profile_clause} -- this parses every company across\n"
+            f"all the pages, adds any new ones to the leads table as unprocessed, and logs\n"
+            f"exactly one Lead_Runs row for the whole {from_page}-{to_page} range (calling it\n"
+            f"once per page instead would log separate single-page rows rather than one range)."
         )
 
         self.root.clipboard_clear()
@@ -203,35 +233,87 @@ class LeadRunsApp:
         self.to_page_var.set("")
         self.refresh_history()
 
+    def on_copy_url(self, url: str):
+        """Copies one run's URL to the clipboard and also loads it into the
+        URL field up in "Log a scrape run", so a past run can be quickly
+        re-scraped (e.g. the next page range of the same search) without
+        retyping it.
+        """
+        self.root.clipboard_clear()
+        self.root.clipboard_append(url)
+        self.root.update()  # keep the clipboard contents after the app loses focus
+        self.url_var.set(url)
+
     # ---------- History ----------
 
     def _build_history_section(self):
         frame = ttk.LabelFrame(self.root, text="Run history (what's already been covered)")
         frame.pack(fill="both", expand=True, padx=12, pady=6)
 
-        columns = ("date", "pages", "url")
-        self.history_tree = ttk.Treeview(frame, columns=columns, show="headings", height=8)
-        self.history_tree.heading("date", text="Date")
-        self.history_tree.heading("pages", text="Pages")
-        self.history_tree.heading("url", text="URL")
-        self.history_tree.column("date", width=140, anchor="center")
-        self.history_tree.column("pages", width=80, anchor="center")
-        self.history_tree.column("url", width=380, anchor="w")
+        header = ttk.Frame(frame)
+        header.pack(fill="x", padx=8, pady=(8, 0))
+        ttk.Label(header, text="Date", width=17, anchor="w").pack(side="left")
+        ttk.Label(header, text="Pages", width=9, anchor="w").pack(side="left")
+        ttk.Label(header, text="URL", width=HISTORY_URL_FIELD_WIDTH, anchor="w").pack(
+            side="left", fill="x", expand=True
+        )
+        ttk.Label(header, text="", width=8).pack(side="right")
 
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.history_tree.yview)
-        self.history_tree.configure(yscrollcommand=scrollbar.set)
-        self.history_tree.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
-        scrollbar.pack(side="right", fill="y", padx=(0, 8), pady=8)
+        outer = ttk.Frame(frame)
+        outer.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+
+        self.history_canvas = tk.Canvas(outer, height=220, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=self.history_canvas.yview)
+        self.history_canvas.configure(yscrollcommand=scrollbar.set)
+        self.history_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # One real widget per row (rather than a Treeview) so each run gets
+        # its own Copy button -- a Treeview can't embed a widget per row.
+        self.history_rows_frame = ttk.Frame(self.history_canvas)
+        self._history_canvas_window = self.history_canvas.create_window(
+            (0, 0), window=self.history_rows_frame, anchor="nw"
+        )
+        self.history_rows_frame.bind(
+            "<Configure>",
+            lambda e: self.history_canvas.configure(scrollregion=self.history_canvas.bbox("all")),
+        )
+        self.history_canvas.bind(
+            "<Configure>",
+            lambda e: self.history_canvas.itemconfigure(self._history_canvas_window, width=e.width),
+        )
 
     def refresh_history(self):
-        self.history_tree.delete(*self.history_tree.get_children())
+        for child in self.history_rows_frame.winfo_children():
+            child.destroy()
+
         with Session(self.engine) as session:
-            runs = session.query(LeadRun).order_by(LeadRun.id.desc()).all()
+            query = session.query(LeadRun)
+            if self.active_profile_id is not None:
+                query = query.filter(LeadRun.profile_id == self.active_profile_id)
+            runs = query.order_by(LeadRun.id.desc()).all()
             for run in runs:
                 date_str = run.run_date.strftime("%Y-%m-%d %H:%M") if run.run_date else ""
-                self.history_tree.insert(
-                    "", "end", values=(date_str, f"{run.from_page}-{run.to_page}", run.url)
-                )
+                self._add_history_row(date_str, f"{run.from_page}-{run.to_page}", run.url)
+
+    def _add_history_row(self, date_str: str, pages_str: str, url: str):
+        row = ttk.Frame(self.history_rows_frame)
+        row.pack(fill="x", pady=1)
+        ttk.Label(row, text=date_str, width=17, anchor="w").pack(side="left")
+        ttk.Label(row, text=pages_str, width=9, anchor="w").pack(side="left")
+        # Button packed (from the right) before the URL label so it always
+        # claims its own space -- otherwise a long, unbounded URL string
+        # pushes it out past the visible/scrollable canvas width.
+        ttk.Button(row, text="Copy", width=8, command=lambda u=url: self.on_copy_url(u)).pack(side="right")
+        # A read-only Entry (not a Label) so the field itself is narrow --
+        # the full url is still the widget's actual content, just not all
+        # visible at once (scrollable with the arrow keys/mouse, same as
+        # any Entry) -- unlike a Label, its width doesn't grow to fit the
+        # text, which is what kept pushing the Copy button off-screen.
+        url_field = ttk.Entry(row, width=HISTORY_URL_FIELD_WIDTH)
+        url_field.insert(0, url)
+        url_field.configure(state="readonly")
+        url_field.pack(side="left", fill="x", expand=True)
 
     # ---------- Process ----------
 

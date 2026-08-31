@@ -5,10 +5,10 @@ linkedin_import.py after a scrape, from any other source -- this:
   1. Uses Gemini's native web-search grounding (google-genai, NOT Tavily --
      see below) to find the company's official website -- stored as just the
      homepage (scheme + domain), never a subpage.
-  2. Searches for a named contact matching decision_maker.md's description
-     (a technical decision-maker -- CTO / VP Eng / Director of IT / Head of
-     Technology -- by default, but editable per business) and their email.
-     If a real email is confirmed
+  2. Searches for a named contact matching the lead's Profile.decision_maker
+     description (a technical decision-maker -- CTO / VP Eng / Director of
+     IT / Head of Technology -- by default, but editable per business/user
+     via the Profile app) and their email. If a real email is confirmed
      in search results, that's used verbatim. If only the person's name is
      found (no email), every plausible email permutation of their name at
      the company's domain is generated (first.last@, flast@, etc.) and
@@ -67,7 +67,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from db import CATEGORIES, DEFAULT_DB, Lead, get_engine
+from db import CATEGORIES, DEFAULT_DB, Lead, Profile, get_engine
 
 load_dotenv()
 
@@ -78,31 +78,14 @@ GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 # script finds its data whether you run it from here or from the project root.
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-
-def _customization_path(env_var: str, default_filename: str) -> Path:
-    """The path for one of the customization files below -- default
-    (a filename next to this script) unless overridden by env_var (e.g.
-    OVERVIEW_FILE=/some/other/overview.md in .env), same override
-    convention as db.py's DATABASE_NAME. A relative override is resolved
-    against SCRIPT_DIR, not the CWD, so it behaves the same regardless of
-    where a script is invoked from; an absolute override is used as-is.
-    """
-    override = os.environ.get(env_var, "").strip()
-    if not override:
-        return SCRIPT_DIR / default_filename
-    override_path = Path(override)
-    return override_path if override_path.is_absolute() else SCRIPT_DIR / override_path
-
-
+# Only email_example.md stays file-based -- it's a Markdown style/structure
+# reference (tone, section shape, formatting), not per-user/business content,
+# so it doesn't belong in the Profile table the way overview/decision-maker/
+# signature-block do (those are now Profile.overview / Profile.decision_maker
+# / Profile.signature_block, editable via profile_app.py instead of files).
 EMAIL_EXAMPLE_PATH = SCRIPT_DIR / "email_example.md"
-SIGNATURE_BLOCK_PATH = _customization_path("SIGNATURE_BLOCK_FILE", "signature_block.md")
-OVERVIEW_PATH = _customization_path("OVERVIEW_FILE", "overview.md")
-DECISION_MAKER_PATH = _customization_path("DECISION_MAKER_FILE", "decision_maker.md")
 
 _email_example_cache: Optional[str] = None
-_signature_block_cache: Optional[str] = None
-_overview_blurb_cache: Optional[str] = None
-_decision_maker_cache: Optional[str] = None
 
 
 def get_email_example() -> str:
@@ -120,77 +103,43 @@ def get_email_example() -> str:
     return _email_example_cache
 
 
-def get_overview_blurb() -> str:
-    """The description of your company/offering (OVERVIEW_BLURB) fed into
-    both the fit-ranking and email-drafting prompts (loaded once and
-    cached). Kept in its own file, separate from code, so it can be
-    tailored per user/business without touching lead_gen.py -- edit
-    overview.md and re-run regenerate_emails.py to backfill existing leads.
-    However the file happens to be line-wrapped, it's collapsed into one
-    flowing paragraph (matching the old hardcoded string's behavior) so
-    editor word-wrap never affects the actual prompt text. Raises a clear
-    error if the file is missing rather than silently drafting emails with
-    no company description.
+class MissingProfileError(Exception):
+    """Raised when a lead needs a Profile (for its overview/decision-maker/
+    signature-block content and sender email) but doesn't have one assigned,
+    and none can be inferred automatically -- a setup problem, not a
+    per-lead one, so callers should stop the whole run rather than silently
+    continuing (same fail-fast handling as a missing customization file used
+    to get before Profile existed).
     """
-    global _overview_blurb_cache
-    if _overview_blurb_cache is None:
-        if not OVERVIEW_PATH.exists():
-            raise FileNotFoundError(
-                f"{OVERVIEW_PATH} not found. This file describes your company/offering and "
-                "is used in every lead's fit-ranking and drafted email -- create it before running."
-            )
-        _overview_blurb_cache = " ".join(OVERVIEW_PATH.read_text(encoding="utf-8").split())
-    return _overview_blurb_cache
 
 
-def get_decision_maker_description() -> str:
-    """The noun phrase describing who counts as the target contact at a
-    prospect company (e.g. "a technical decision-maker (CTO, VP of
-    Engineering, Head of Technology, or Director of IT/Engineering)") --
-    drops directly into find_contact()'s "Search the web for ___ at this
-    company" prompt. Kept in its own file so a different user/business can
-    retarget contact search at a different kind of decision-maker (e.g.
-    marketing, finance, operations) without touching lead_gen.py -- edit
-    decision_maker.md. Loaded once and cached; however it's line-wrapped in
-    the file, it's collapsed into one flowing phrase. Raises a clear error
-    if the file is missing rather than silently searching for no one in
-    particular.
+def resolve_lead_profile(session: Session, lead: Lead) -> Profile:
+    """Returns the Profile a lead should be enriched/drafted/sent under.
+
+    If the lead already has one assigned, returns it. Otherwise, auto-
+    assigns (and persists) the sole Profile in the database if there's
+    exactly one -- the common single-business case, and how leads get their
+    first Profile after the one-time migrate_to_profile.py backfill. If
+    zero or more than one Profile exists, which one to use is genuinely
+    ambiguous, so this raises MissingProfileError rather than guessing --
+    assign the lead's profile explicitly (profile_app.py) first.
     """
-    global _decision_maker_cache
-    if _decision_maker_cache is None:
-        if not DECISION_MAKER_PATH.exists():
-            raise FileNotFoundError(
-                f"{DECISION_MAKER_PATH} not found. This file describes who counts as the "
-                "target contact at a prospect company -- create it before running."
-            )
-        _decision_maker_cache = " ".join(DECISION_MAKER_PATH.read_text(encoding="utf-8").split())
-    return _decision_maker_cache
+    if lead.profile is not None:
+        return lead.profile
+    profiles = session.query(Profile).all()
+    if len(profiles) == 1:
+        lead.profile = profiles[0]
+        session.commit()
+        return lead.profile
+    if not profiles:
+        raise MissingProfileError(
+            "No Profile exists yet. Create one in the Profile app before processing leads."
+        )
+    raise MissingProfileError(
+        f"Lead {lead.name!r} has no profile assigned, and {len(profiles)} profiles exist -- "
+        "assign one explicitly in the Profile app before processing."
+    )
 
-
-def get_signature_block() -> str:
-    """The Markdown closing/signature appended to every drafted email (loaded
-    once and cached). Kept in its own file rather than a Python constant so
-    the signature can be changed (name, title, contact info) without
-    touching code -- edit signature_block.md and re-run regenerate_emails.py
-    to backfill existing leads. Each line but the last must end with two
-    trailing spaces (Markdown's hard-break syntax) to render as separate
-    lines instead of one run-on paragraph -- see email_example.md's note on
-    this same point. Raises a clear error if the file is missing rather than
-    silently drafting emails with no signature.
-    """
-    global _signature_block_cache
-    if _signature_block_cache is None:
-        if not SIGNATURE_BLOCK_PATH.exists():
-            raise FileNotFoundError(
-                f"{SIGNATURE_BLOCK_PATH} not found. This file is the Markdown closing/signature "
-                "appended to every drafted email -- create it before running."
-            )
-        # Strip only the trailing newline(s) read_text() picks up from the
-        # file's own end-of-file, not the intentional trailing double-spaces
-        # on each line (those are the hard-break markers, not incidental
-        # whitespace) -- rstrip("\n") specifically, never a plain rstrip().
-        _signature_block_cache = SIGNATURE_BLOCK_PATH.read_text(encoding="utf-8").rstrip("\n")
-    return _signature_block_cache
 
 # Domains that show up in "company official website" searches but are never
 # the company's own site -- skip these when picking the website URL.
@@ -215,8 +164,8 @@ class ContactInfo(BaseModel):
     contact_name: Optional[str] = Field(
         None,
         description="Full name of the target decision-maker described in the "
-        "prompt (see decision_maker.md) ONLY if it appears explicitly in the "
-        "provided search results. Null if not found.",
+        "prompt (see the Profile's decision_maker text) ONLY if it appears "
+        "explicitly in the provided search results. Null if not found.",
     )
     contact_title: Optional[str] = Field(
         None, description="That person's job title, only if stated in the search results."
@@ -382,18 +331,21 @@ def generate_email_permutations(full_name: str, domain: str) -> list[str]:
     return list(dict.fromkeys(candidates))  # de-dupe, preserve order
 
 
-def find_contact(client: genai.Client, company: dict, domain: Optional[str]) -> ContactInfo:
-    """Grounded Gemini web search for the target decision-maker described in
-    decision_maker.md (or a generic company email as a fallback). Only
-    reports facts it actually finds via search -- never guesses, infers, or
-    constructs an email address from a name/domain pattern (that's
-    generate_email_permutations' job, done separately in process_company
-    once we know this came up empty).
+def find_contact(
+    client: genai.Client, company: dict, domain: Optional[str], decision_maker_description: str
+) -> ContactInfo:
+    """Grounded Gemini web search for the target decision-maker described by
+    decision_maker_description (a Profile's decision_maker text, e.g. "a
+    technical decision-maker (CTO, VP of Engineering, ...)") -- or a generic
+    company email as a fallback. Only reports facts it actually finds via
+    search -- never guesses, infers, or constructs an email address from a
+    name/domain pattern (that's generate_email_permutations' job, done
+    separately in process_company once we know this came up empty).
     """
     site_hint = f" (website: {domain})" if domain else ""
     prompt = (
         f"Company: {company['company name']}{site_hint} ({company['city']}, {company['state']})\n\n"
-        f"Search the web for {get_decision_maker_description()} at this company, and their "
+        f"Search the web for {decision_maker_description} at this company, and their "
         "email address, if publicly listed. If no named contact matching that description can "
         "be confirmed, look for a general company contact email (info@, contact@, hello@) "
         "instead. Only report facts you actually find via search -- never guess, infer, or "
@@ -429,7 +381,14 @@ def build_greeting(contact: ContactInfo) -> str:
     return "Greetings,"
 
 
-def draft_email(write_llm: ChatOpenAI, company: dict, website: Optional[str], contact: ContactInfo) -> LeadAssessment:
+def draft_email(
+    write_llm: ChatOpenAI,
+    company: dict,
+    website: Optional[str],
+    contact: ContactInfo,
+    overview_blurb: str,
+    signature_block: str,
+) -> LeadAssessment:
     structured = write_llm.with_structured_output(LeadAssessment)
     contact_desc = (
         f"Named contact: {contact.contact_name} ({contact.contact_title})"
@@ -437,7 +396,7 @@ def draft_email(write_llm: ChatOpenAI, company: dict, website: Optional[str], co
         else "No named contact identified."
     )
     human = (
-        f"{get_overview_blurb()}\n\n"
+        f"{overview_blurb}\n\n"
         "Prospect company:\n"
         f"- Name: {company['company name']}\n"
         f"- Location: {company['city']}, {company['state']}\n"
@@ -479,12 +438,6 @@ def draft_email(write_llm: ChatOpenAI, company: dict, website: Optional[str], co
         + get_email_example()
         + "\n---"
     )
-    # Fetched before the try below (same reasoning as get_overview_blurb()
-    # and get_email_example() already being outside it, in `human` above) --
-    # a missing signature_block.md is a setup problem, not a per-lead LLM
-    # failure, so it must propagate rather than being caught by the except
-    # below and silently turned into an empty, signature-less "success".
-    signature_block = get_signature_block()
     try:
         result = structured.invoke([("system", BASE_SYSTEM_PROMPT), ("human", human)])
         greeting = build_greeting(contact)
@@ -495,12 +448,12 @@ def draft_email(write_llm: ChatOpenAI, company: dict, website: Optional[str], co
         return LeadAssessment(ranking=1, category="Other", subject="", body="")
 
 
-def process_company(client: genai.Client, write_llm: ChatOpenAI, company: dict) -> dict:
+def process_company(client: genai.Client, write_llm: ChatOpenAI, company: dict, profile: Profile) -> dict:
     name = company["company name"]
     print(f"  -> {name}")
 
     website, domain = find_website(client, company)
-    contact = find_contact(client, company, domain)
+    contact = find_contact(client, company, domain, profile.decision_maker)
 
     if contact.contact_email:
         email = contact.contact_email
@@ -509,7 +462,7 @@ def process_company(client: genai.Client, write_llm: ChatOpenAI, company: dict) 
     else:
         email = contact.generic_email or ""
 
-    assessment = draft_email(write_llm, company, website, contact)
+    assessment = draft_email(write_llm, company, website, contact, profile.overview, profile.signature_block)
 
     return {
         "name": name,
@@ -538,14 +491,14 @@ def process_unprocessed_leads(
     per-lead failure alike (a bad search result, a flaky API response,
     etc.), so a permanently-broken lead is never retried forever.
 
-    The one exception is a missing customization file (overview.md,
-    signature_block.md, decision_maker.md, email_example.md) -- that's a
-    setup problem, not a per-lead one: every remaining lead would fail
-    identically, so this stops the whole run (re-raising FileNotFoundError)
-    rather than silently burning through the queue marking leads
-    processed=True with no real content. The lead being processed when this
-    happens, and everything after it, is left processed=False so a re-run
-    (once the file is in place) picks them back up.
+    The one exception is a missing customization file (email_example.md) or
+    a lead with no resolvable Profile (MissingProfileError) -- both are
+    setup problems, not per-lead ones: every remaining lead would fail
+    identically, so this stops the whole run (re-raising) rather than
+    silently burning through the queue marking leads processed=True with no
+    real content. The lead being processed when this happens, and
+    everything after it, is left processed=False so a re-run (once the
+    setup issue is fixed) picks them back up.
 
     on_progress, if given, is called as on_progress(i, total, lead) before
     each lead is processed -- lets a GUI show live status without this
@@ -567,8 +520,9 @@ def process_unprocessed_leads(
             "description": lead.description,
         }
         try:
-            row = process_company(client, write_llm, company)
-        except FileNotFoundError:
+            profile = resolve_lead_profile(session, lead)
+            row = process_company(client, write_llm, company, profile)
+        except (FileNotFoundError, MissingProfileError):
             raise
         except Exception as e:
             print(f"    [FAILED: {e}]", file=sys.stderr)
@@ -607,7 +561,7 @@ def main() -> None:
             done = process_unprocessed_leads(
                 session, client, write_llm, limit=args.limit, sleep_seconds=args.sleep, on_progress=report
             )
-        except FileNotFoundError as e:
+        except (FileNotFoundError, MissingProfileError) as e:
             sys.exit(f"Stopped: {e}")
         remaining_after = session.query(Lead).filter(Lead.processed.is_(False)).count()
 

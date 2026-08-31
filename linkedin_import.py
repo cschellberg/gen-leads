@@ -18,7 +18,8 @@ Usage:
 
     with Session(get_engine(DEFAULT_DB)) as session:
         added = ingest_linkedin_page_text(
-            session, url=SEARCH_URL, from_page=11, to_page=11, raw_text=page_text
+            session, url=SEARCH_URL, from_page=11, to_page=11, raw_text=page_text,
+            profile_id=1,  # optional -- which Profile these new leads belong to
         )
 """
 
@@ -122,11 +123,21 @@ def _normalize_name(name: str) -> str:
     return re.sub(r"[™®©]", "", name).strip().lower()
 
 
-def ingest_linkedin_page_text(session, url: str, from_page: int, to_page: int, raw_text: str) -> int:
+def ingest_linkedin_page_text(
+    session, url: str, from_page: int, to_page: int, raw_text: str, profile_id: int | None = None
+) -> int:
     """Parses raw_text and adds any new companies to `leads` (processed=False,
     skipping names already present -- same idempotency rule as lead_gen.py),
     then logs one lead_runs row for this page range regardless of how many
     (if any) were new. Returns the number of companies actually added.
+
+    profile_id, if given, is set on every newly-added lead (db.Lead.profile_id)
+    so it's enriched/drafted/sent under that Profile's identity later, and on
+    the logged LeadRun row itself (db.LeadRun.profile_id), attributing this
+    scrape to that Profile. Leave unset to fall back on
+    lead_gen.resolve_lead_profile()'s auto-assignment at process time (only
+    works when exactly one Profile exists) -- the LeadRun row just stays
+    unattributed in that case.
     """
     entries = parse_linkedin_page_text(raw_text)
     existing_names = {_normalize_name(name) for (name,) in session.query(Lead.name).all()}
@@ -142,11 +153,12 @@ def ingest_linkedin_page_text(session, url: str, from_page: int, to_page: int, r
                 city=entry["city"],
                 state=entry["state"],
                 description=entry["description"],
+                profile_id=profile_id,
             )
         )
         existing_names.add(key)
         added += 1
 
-    session.add(LeadRun(url=url, from_page=from_page, to_page=to_page))
+    session.add(LeadRun(url=url, from_page=from_page, to_page=to_page, profile_id=profile_id))
     session.commit()
     return added

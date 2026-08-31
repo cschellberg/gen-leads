@@ -57,7 +57,7 @@ from google import genai
 from sqlalchemy.orm import Session
 
 from db import DEFAULT_DB, Lead, get_engine
-from lead_gen import find_contact, find_website, generate_email_permutations, make_genai_client
+from lead_gen import find_contact, find_website, generate_email_permutations, make_genai_client, resolve_lead_profile
 
 load_dotenv()
 
@@ -141,8 +141,9 @@ def fix_emails(session: Session, client: genai.Client, leads: list[Lead], sleep_
             print(f"    no known domain -- clearing bad email {lead.email!r}")
             new_email = ""
         else:
+            profile = resolve_lead_profile(session, lead)
             company = {"company name": lead.name, "city": lead.city, "state": lead.state}
-            contact = find_contact(client, company, domain)
+            contact = find_contact(client, company, domain, profile.decision_maker)
             if contact.contact_email:
                 new_email = contact.contact_email
             elif contact.contact_name:

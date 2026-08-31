@@ -39,10 +39,14 @@ from verify_email import verify_email_smtp  # noqa: E402
 
 
 class VerifyEmailApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Misc):
         self.root = root
-        self.root.title("Verify Email")
-        self._center_window(520, 380)
+        # root is a real window (standalone run) or a plain Frame embedded
+        # in main_app.py's content area (normal flow, one consolidated
+        # window) -- only a real window has .title()/.geometry() to set.
+        if isinstance(root, (tk.Tk, tk.Toplevel)):
+            self.root.title("Verify Email")
+            self._center_window(520, 380)
 
         self.result_queue: "queue.Queue[str]" = queue.Queue()
 

@@ -7,17 +7,21 @@ Standalone desktop app for browsing and acting on the leads database.
   fields editable) and a Send Mail button (opens a panel below the list
   showing every field read-only EXCEPT email/subject/body, which are
   editable).
-- Hitting "Send" in the mail panel sends the email through Gmail (SMTP,
-  from the account set by SENDER_EMAIL in .env) and -- only on a successful
-  send -- persists the edited email/subject/body back to the database and
-  increments times_contacted.
+- Hitting "Send" in the mail panel sends the email through Gmail (SMTP, from
+  the lead's own Profile.email -- see db.py -- so different leads can be
+  sent as different business identities) and -- only on a successful send --
+  persists the edited email/subject/body back to the database and increments
+  times_contacted.
 
 Setup:
   1. In Google Account settings, enable 2-Step Verification, then create an
      "App Password" for Mail: https://myaccount.google.com/apppasswords
   2. Add to .env (in the project root, next to this gen-leads/ folder):
-       SENDER_EMAIL="<the Gmail address to send from>"
-       GMAIL_APP_PASSWORD="<that 16-character app password, for the same account>"
+       GMAIL_APP_PASSWORD="<that 16-character app password>"
+     Note: all Profiles currently share this one SMTP credential, so their
+     Profile.email values need to be addresses this same app password can
+     authenticate as (e.g. aliases on one Gmail account) -- there's no
+     per-Profile app password yet.
 
 Backup DB button:
   Uploads leads.db to the S3 bucket named by the S3_BUCKET env var, as
@@ -66,14 +70,12 @@ from tkinter import messagebox, ttk
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from db import CATEGORIES, Lead, get_engine, DEFAULT_DB  # noqa: E402
+from db import CATEGORIES, Lead, Profile, get_engine, DEFAULT_DB  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 from verify_email import verify_email_smtp  # noqa: E402
 
 load_dotenv()
 
-SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "dschellberg@gmail.com")
-SENDER_DISPLAY = f"Succinct Solutions <{SENDER_EMAIL}>"
 DRY_RUN = os.environ.get("LEADS_GUI_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
 
 ROWS_VISIBLE = 10
@@ -90,6 +92,7 @@ COLS = [
     ("email", "Email", 280),
 ]
 ALL_CATEGORIES_LABEL = "All Categories"
+ALL_PROFILES_LABEL = "All Profiles"
 BUTTON_AREA_WIDTH = 260  # reserved space for the Edit / Send Mail / Disable buttons
 SCROLLBAR_WIDTH = 16  # tk.Scrollbar (not ttk) so this is an exact, known pixel value
 TABLE_WIDTH = sum(width for _, _, width in COLS) + BUTTON_AREA_WIDTH  # full (scrollable) content width
@@ -108,8 +111,9 @@ def markdown_body_to_html(body: str) -> str:
     )
 
 
-def send_email_via_gmail(to_addr: str, subject: str, body: str) -> None:
-    """Sends one email through Gmail SMTP. Raises on failure.
+def send_email_via_gmail(from_email: str, to_addr: str, subject: str, body: str) -> None:
+    """Sends one email through Gmail SMTP, from from_email (a Profile's
+    email -- see db.py). Raises on failure.
 
     The body is authored as Markdown; this sends it as a multipart/alternative
     message so most clients render the formatted HTML version (bold, bullet
@@ -120,7 +124,7 @@ def send_email_via_gmail(to_addr: str, subject: str, body: str) -> None:
     """
     if DRY_RUN:
         print(
-            f"[DRY RUN] would send email\n  To: {to_addr}\n  From: {SENDER_DISPLAY}\n"
+            f"[DRY RUN] would send email\n  To: {to_addr}\n  From: {from_email}\n"
             f"  Subject: {subject}\n  Body:\n{body}\n"
         )
         return
@@ -134,15 +138,15 @@ def send_email_via_gmail(to_addr: str, subject: str, body: str) -> None:
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = SENDER_DISPLAY
+    msg["From"] = from_email
     msg["To"] = to_addr
     msg.attach(MIMEText(body, "plain"))
     msg.attach(MIMEText(markdown_body_to_html(body), "html"))
 
     with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
         server.starttls()
-        server.login(SENDER_EMAIL, app_password)
-        server.sendmail(SENDER_EMAIL, [to_addr], msg.as_string())
+        server.login(from_email, app_password)
+        server.sendmail(from_email, [to_addr], msg.as_string())
 
 
 def backup_db_to_s3() -> str:
@@ -257,10 +261,14 @@ class VScrollableFrame(ttk.Frame):
 
 
 class LeadsApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Misc, active_profile_id: int | None = None):
         self.root = root
-        self.root.title("Leads")
-        self._center_window(min(VIEWPORT_WIDTH, TABLE_WIDTH) + 60, 760)
+        # root is a real window (standalone run) or a plain Frame embedded
+        # in main_app.py's content area (normal flow, one consolidated
+        # window) -- only a real window has .title()/.geometry() to set.
+        if isinstance(root, (tk.Tk, tk.Toplevel)):
+            self.root.title("Leads")
+            self._center_window(min(VIEWPORT_WIDTH, TABLE_WIDTH) + 60, 760)
 
         self.engine = get_engine(DEFAULT_DB)
         self.sort_mode = tk.StringVar(value="natural")
@@ -269,8 +277,10 @@ class LeadsApp:
         self.processed_mode = tk.StringVar(value="processed")  # "processed" or "unprocessed"
         self.search_text = tk.StringVar(value="")
         self.category_filter = tk.StringVar(value=ALL_CATEGORIES_LABEL)
+        self.profile_filter = tk.StringVar(value=ALL_PROFILES_LABEL)
+        self._profile_id_by_email: dict[str, int] = {}
 
-        self._build_top_bar()
+        self._build_top_bar(active_profile_id)
 
         # Header and the scrollable row list share one parent so they end up
         # pixel-identical -- that's what keeps the header columns lined up
@@ -298,7 +308,7 @@ class LeadsApp:
         y = (self.root.winfo_screenheight() - height) // 2
         self.root.geometry(f"{width}x{height}+{max(x, 0)}+{max(y, 0)}")
 
-    def _build_top_bar(self):
+    def _build_top_bar(self, active_profile_id: int | None):
         bar = ttk.Frame(self.root)
         bar.pack(fill="x", padx=8, pady=8)
 
@@ -343,6 +353,14 @@ class LeadsApp:
         )
         category_combo.pack(side="left", padx=(6, 0))
         category_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
+
+        ttk.Label(row1, text="Profile:").pack(side="left", padx=(18, 0))
+        self.profile_combo = ttk.Combobox(
+            row1, textvariable=self.profile_filter, state="readonly", width=22
+        )
+        self.profile_combo.pack(side="left", padx=(6, 0))
+        self.profile_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
+        self._load_profile_choices(active_profile_id)
 
         row2 = ttk.Frame(bar)
         row2.pack(anchor="center", pady=(6, 0))
@@ -436,6 +454,43 @@ class LeadsApp:
         self.search_text.set("")
         self.refresh()
 
+    def _load_profile_choices(self, select_profile_id: int | None = None):
+        """(Re)loads the Profile filter dropdown's choices from the
+        database -- called at startup and whenever main_app.py pushes a
+        profile change via set_active_profile_id(). (Profiles can only be
+        added/edited/deleted while this app *isn't* the one embedded --
+        main_app.py shows one embedded app at a time -- so a fresh instance
+        of this class always sees current data; no need to re-query mid-
+        session otherwise.) If select_profile_id names a known profile, the
+        dropdown is set to it; otherwise the current selection is kept if
+        still valid, or reset to "All Profiles" if not.
+        """
+        with Session(self.engine) as session:
+            profiles = session.query(Profile).order_by(Profile.id.asc()).all()
+            self._profile_id_by_email = {p.email: p.id for p in profiles}
+
+        values = [ALL_PROFILES_LABEL, *self._profile_id_by_email.keys()]
+        self.profile_combo["values"] = values
+
+        if select_profile_id is not None:
+            for email, profile_id in self._profile_id_by_email.items():
+                if profile_id == select_profile_id:
+                    self.profile_filter.set(email)
+                    return
+        if self.profile_filter.get() not in values:
+            self.profile_filter.set(ALL_PROFILES_LABEL)
+
+    def set_active_profile_id(self, profile_id: int | None) -> None:
+        """Called by main_app.py when its Active Profile dropdown changes
+        while this app is the one currently embedded -- filters the list
+        down to that profile's leads (or "All Profiles" if profile_id is
+        None, e.g. no profile exists yet)."""
+        if profile_id is None:
+            self.profile_filter.set(ALL_PROFILES_LABEL)
+        else:
+            self._load_profile_choices(select_profile_id=profile_id)
+        self.refresh()
+
     def load_leads(self) -> list[Lead]:
         with Session(self.engine) as session:
             query = session.query(Lead)
@@ -470,6 +525,12 @@ class LeadsApp:
             category = self.category_filter.get()
             if category and category != ALL_CATEGORIES_LABEL:
                 query = query.filter(Lead.category == category)
+
+            profile_choice = self.profile_filter.get()
+            if profile_choice and profile_choice != ALL_PROFILES_LABEL:
+                profile_id = self._profile_id_by_email.get(profile_choice)
+                if profile_id is not None:
+                    query = query.filter(Lead.profile_id == profile_id)
 
             if self.sort_mode.get() == "ranking":
                 query = query.order_by(Lead.ranking.desc(), Lead.id.asc())
@@ -731,6 +792,15 @@ class LeadsApp:
         with Session(self.engine) as session:
             lead = self._get_lead(session, lead_id)
 
+            if lead.profile is None:
+                messagebox.showerror(
+                    "No profile assigned",
+                    f"{lead.name!r} has no Profile assigned, so there's no sender identity to send as. "
+                    "Assign one in the Profile app first.",
+                )
+                return
+            from_email = lead.profile.email
+
             panel = ttk.LabelFrame(self.detail_container.inner, text=f"Send Mail — {lead.name}")
             panel.pack(anchor="center", pady=4)
 
@@ -747,36 +817,39 @@ class LeadsApp:
             add_readonly(4, "Website", lead.website)
             add_readonly(5, "Times contacted", lead.times_contacted)
             add_readonly(6, "Status", "Disabled" if lead.disabled else "Active")
+            add_readonly(7, "Sending as", from_email)
 
-            ttk.Label(panel, text="Email").grid(row=7, column=0, sticky="ne", padx=6, pady=4)
+            ttk.Label(panel, text="Email").grid(row=8, column=0, sticky="ne", padx=6, pady=4)
             email_entry = ttk.Entry(panel, width=60)
             email_entry.insert(0, lead.email)
-            email_entry.grid(row=7, column=1, sticky="w", padx=6, pady=4)
+            email_entry.grid(row=8, column=1, sticky="w", padx=6, pady=4)
 
-            ttk.Label(panel, text="Subject").grid(row=8, column=0, sticky="ne", padx=6, pady=4)
+            ttk.Label(panel, text="Subject").grid(row=9, column=0, sticky="ne", padx=6, pady=4)
             subject_entry = ttk.Entry(panel, width=60)
             subject_entry.insert(0, lead.subject)
-            subject_entry.grid(row=8, column=1, sticky="w", padx=6, pady=4)
+            subject_entry.grid(row=9, column=1, sticky="w", padx=6, pady=4)
 
-            ttk.Label(panel, text="Body").grid(row=9, column=0, sticky="ne", padx=6, pady=4)
+            ttk.Label(panel, text="Body").grid(row=10, column=0, sticky="ne", padx=6, pady=4)
             body_text = tk.Text(panel, width=60, height=8, wrap="word")
             body_text.insert("1.0", lead.body)
-            body_text.grid(row=9, column=1, sticky="w", padx=6, pady=4)
+            body_text.grid(row=10, column=1, sticky="w", padx=6, pady=4)
 
             status_label = ttk.Label(panel, text="", foreground="#a15c00")
-            status_label.grid(row=10, column=0, columnspan=2)
+            status_label.grid(row=11, column=0, columnspan=2)
 
             btn_row = ttk.Frame(panel)
-            btn_row.grid(row=11, column=0, columnspan=2, pady=10)
+            btn_row.grid(row=12, column=0, columnspan=2, pady=10)
             send_btn = ttk.Button(
                 btn_row,
                 text="Send",
-                command=lambda: self._send(lead_id, email_entry, subject_entry, body_text, status_label, send_btn),
+                command=lambda: self._send(
+                    lead_id, from_email, email_entry, subject_entry, body_text, status_label, send_btn
+                ),
             )
             send_btn.pack(side="left", padx=6)
             ttk.Button(btn_row, text="Cancel", command=self.close_detail_panel).pack(side="left", padx=6)
 
-    def _send(self, lead_id, email_entry, subject_entry, body_text, status_label, send_btn):
+    def _send(self, lead_id, from_email, email_entry, subject_entry, body_text, status_label, send_btn):
         to_addr = email_entry.get().strip()
         subject = subject_entry.get().strip()
         body = body_text.get("1.0", "end").strip()
@@ -793,7 +866,7 @@ class LeadsApp:
         self.root.update_idletasks()
 
         try:
-            send_email_via_gmail(to_addr, subject, body)
+            send_email_via_gmail(from_email, to_addr, subject, body)
         except Exception as e:
             send_btn.config(state="normal")
             status_label.config(text="")
