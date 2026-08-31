@@ -8,15 +8,16 @@ Standalone desktop app for browsing and acting on the leads database.
   showing every field read-only EXCEPT email/subject/body, which are
   editable).
 - Hitting "Send" in the mail panel sends the email through Gmail (SMTP,
-  from dschellberg@gmail.com) and -- only on a successful send -- persists
-  the edited email/subject/body back to the database and increments
-  times_contacted.
+  from the account set by SENDER_EMAIL in .env) and -- only on a successful
+  send -- persists the edited email/subject/body back to the database and
+  increments times_contacted.
 
 Setup:
   1. In Google Account settings, enable 2-Step Verification, then create an
      "App Password" for Mail: https://myaccount.google.com/apppasswords
-  2. Add GMAIL_APP_PASSWORD="<that 16-character password>" to .env
-     (in the project root, next to this gen-leads/ folder).
+  2. Add to .env (in the project root, next to this gen-leads/ folder):
+       SENDER_EMAIL="<the Gmail address to send from>"
+       GMAIL_APP_PASSWORD="<that 16-character app password, for the same account>"
 
 Backup DB button:
   Uploads leads.db to the S3 bucket named by the S3_BUCKET env var, as
@@ -71,7 +72,7 @@ from verify_email import verify_email_smtp  # noqa: E402
 
 load_dotenv()
 
-SENDER_EMAIL = "dschellberg@gmail.com"
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "dschellberg@gmail.com")
 SENDER_DISPLAY = f"Succinct Solutions <{SENDER_EMAIL}>"
 DRY_RUN = os.environ.get("LEADS_GUI_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
 

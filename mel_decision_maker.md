@@ -1,0 +1,1 @@
+a business, product, or design decision-maker (CEO, Founder, Head of Product, Creative Director, or Head of Growth)
