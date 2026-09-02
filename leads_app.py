@@ -258,6 +258,12 @@ class VScrollableFrame(ttk.Frame):
     def clear(self):
         for child in self.inner.winfo_children():
             child.destroy()
+        # Without this, scrolling down to reach a field near the bottom of a
+        # tall panel (e.g. the Verify Email button) leaves the canvas scrolled
+        # to that position -- so the next panel built in here (a different
+        # lead's Edit panel, Send Mail panel, etc.) opens with its top content
+        # scrolled out of view instead of visible, looking like it's missing.
+        self.canvas.yview_moveto(0)
 
 
 class LeadsApp:
