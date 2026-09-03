@@ -75,7 +75,6 @@ from sqlalchemy.orm import Session  # noqa: E402
 from verify_email import verify_email_smtp  # noqa: E402
 
 load_dotenv()
-ADMIN_EMAIL=os.environ.get("ADMIN_EMAIL","dschellberg@gmail.com")
 DRY_RUN = os.environ.get("LEADS_GUI_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
 
 ROWS_VISIBLE = 10
@@ -129,7 +128,7 @@ def send_email_via_gmail(from_email: str, to_addr: str, subject: str, body: str)
         )
         return
 
-    app_password = os.environ.get("GMAIL_APP_PASSWORD")
+    app_password = os.environ.get(from_email.split("@")[0])
     if not app_password:
         raise RuntimeError(
             "GMAIL_APP_PASSWORD is not set in .env. Create a Gmail App Password "
@@ -145,7 +144,7 @@ def send_email_via_gmail(from_email: str, to_addr: str, subject: str, body: str)
 
     with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
         server.starttls()
-        server.login(ADMIN_EMAIL, app_password)
+        server.login(from_email, app_password)
         server.sendmail(from_email, [to_addr], msg.as_string())
 
 
