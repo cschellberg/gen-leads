@@ -28,6 +28,12 @@ Backup DB button:
   leads<yyyyMMdd>.db (relies on AWS credentials being available via boto3's
   normal credential chain, e.g. ~/.aws/credentials).
 
+Career Pages button:
+  Writes every processed lead's name/description/ranking/career_page to
+  leads.csv next to this file (overwritten each time, not appended) --
+  scoped to whichever Profile is selected in the Profile filter dropdown
+  ("All Profiles" exports every processed lead regardless of profile).
+
 Safety / testing:
   Set the environment variable LEADS_GUI_DRY_RUN=1 to make "Send" print the
   email to the console instead of actually sending it (the DB is still
@@ -38,6 +44,7 @@ Run:
     python leads_app.py
 """
 
+import csv
 import os
 import queue
 import re
@@ -87,6 +94,7 @@ COLS = [
     ("ranking", "Rank", 55),
     ("times_contacted", "Contacted", 90),
     ("status", "Status", 70),
+    ("flag", "Flag", 55),
     ("website", "Website", 420),
     ("email", "Email", 280),
 ]
@@ -127,8 +135,11 @@ def send_email_via_gmail(from_email: str, to_addr: str, subject: str, body: str)
             f"  Subject: {subject}\n  Body:\n{body}\n"
         )
         return
-
-    app_password = os.environ.get(from_email.split("@")[0])
+    if "gmail.com" not in from_email:
+        email_key=from_email.replace("@", "_").replace(".", "_")
+        app_password = os.environ.get(email_key)
+    else:
+        app_password = os.environ.get(from_email.split("@")[0])
     if not app_password:
         raise RuntimeError(
             "GMAIL_APP_PASSWORD is not set in .env. Create a Gmail App Password "
@@ -283,6 +294,7 @@ class LeadsApp:
         self.search_text = tk.StringVar(value="")
         self.category_filter = tk.StringVar(value=ALL_CATEGORIES_LABEL)
         self.profile_filter = tk.StringVar(value=ALL_PROFILES_LABEL)
+        self.flag_filter = tk.StringVar(value="all")  # "all" or "flagged"
         self._profile_id_by_email: dict[str, int] = {}
 
         self._build_top_bar(active_profile_id)
@@ -367,6 +379,16 @@ class LeadsApp:
         self.profile_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
         self._load_profile_choices(active_profile_id)
 
+        ttk.Label(row1, text="Flag:").pack(side="left", padx=(18, 0))
+        flag_all_rb = ttk.Radiobutton(
+            row1, text="All", variable=self.flag_filter, value="all", command=self.refresh
+        )
+        flag_yes_rb = ttk.Radiobutton(
+            row1, text="Flagged", variable=self.flag_filter, value="flagged", command=self.refresh
+        )
+        flag_all_rb.pack(side="left", padx=(6, 0))
+        flag_yes_rb.pack(side="left", padx=(6, 0))
+
         row2 = ttk.Frame(bar)
         row2.pack(anchor="center", pady=(6, 0))
 
@@ -386,6 +408,10 @@ class LeadsApp:
 
         self.backup_btn = ttk.Button(row2, text="Backup DB", command=self._backup_db)
         self.backup_btn.pack(side="left", padx=(18, 0))
+
+        ttk.Button(row2, text="Career Pages", command=self._export_career_pages_csv).pack(
+            side="left", padx=(6, 0)
+        )
 
         self.count_label = ttk.Label(row2, text="")
         self.count_label.pack(side="left", padx=(18, 0))
@@ -500,42 +526,50 @@ class LeadsApp:
         with Session(self.engine) as session:
             query = session.query(Lead)
 
-            if self.show_mode.get() == "active":
-                query = query.filter(Lead.disabled.is_(False))
-
-            if self.processed_mode.get() == "processed":
-                query = query.filter(Lead.processed.is_(True))
+            # "Flagged" is an exclusive view: when selected, flag status is
+            # the *only* criterion for what's included -- every other filter
+            # (show/processed mode, times contacted, search, category,
+            # profile) is ignored, so a flagged lead always shows up here
+            # regardless of its other attributes.
+            if self.flag_filter.get() == "flagged":
+                query = query.filter(Lead.flag.is_(True))
             else:
-                query = query.filter(Lead.processed.is_(False))
+                if self.show_mode.get() == "active":
+                    query = query.filter(Lead.disabled.is_(False))
 
-            raw = self.max_times_contacted.get().strip()
-            if raw:
-                try:
-                    threshold = int(raw)
-                    if threshold < 0:
-                        raise ValueError
-                except ValueError:
-                    messagebox.showerror(
-                        "Invalid filter", "\"Times contacted ≤\" must be a non-negative whole number."
-                    )
+                if self.processed_mode.get() == "processed":
+                    query = query.filter(Lead.processed.is_(True))
                 else:
-                    query = query.filter(Lead.times_contacted <= threshold)
+                    query = query.filter(Lead.processed.is_(False))
 
-            needle = self.search_text.get().strip()
-            if needle:
-                # ilike -- case-insensitive substring match against the
-                # company name only ("phi" matches "Philadelphia Eagles").
-                query = query.filter(Lead.name.ilike(f"%{needle}%"))
+                raw = self.max_times_contacted.get().strip()
+                if raw:
+                    try:
+                        threshold = int(raw)
+                        if threshold < 0:
+                            raise ValueError
+                    except ValueError:
+                        messagebox.showerror(
+                            "Invalid filter", "\"Times contacted ≤\" must be a non-negative whole number."
+                        )
+                    else:
+                        query = query.filter(Lead.times_contacted <= threshold)
 
-            category = self.category_filter.get()
-            if category and category != ALL_CATEGORIES_LABEL:
-                query = query.filter(Lead.category == category)
+                needle = self.search_text.get().strip()
+                if needle:
+                    # ilike -- case-insensitive substring match against the
+                    # company name only ("phi" matches "Philadelphia Eagles").
+                    query = query.filter(Lead.name.ilike(f"%{needle}%"))
 
-            profile_choice = self.profile_filter.get()
-            if profile_choice and profile_choice != ALL_PROFILES_LABEL:
-                profile_id = self._profile_id_by_email.get(profile_choice)
-                if profile_id is not None:
-                    query = query.filter(Lead.profile_id == profile_id)
+                category = self.category_filter.get()
+                if category and category != ALL_CATEGORIES_LABEL:
+                    query = query.filter(Lead.category == category)
+
+                profile_choice = self.profile_filter.get()
+                if profile_choice and profile_choice != ALL_PROFILES_LABEL:
+                    profile_id = self._profile_id_by_email.get(profile_choice)
+                    if profile_id is not None:
+                        query = query.filter(Lead.profile_id == profile_id)
 
             if self.sort_mode.get() == "ranking":
                 query = query.order_by(Lead.ranking.desc(), Lead.id.asc())
@@ -582,12 +616,15 @@ class LeadsApp:
             "ranking": str(lead.ranking),
             "times_contacted": str(lead.times_contacted),
             "status": "Disabled" if lead.disabled else "Active",
+            "flag": "Yes" if lead.flag else "No",
             "website": lead.website,
             "email": lead.email,
         }
         for key, _, width in COLS:
             widget = self._make_cell(row, values[key], width)
             if key == "status" and lead.disabled:
+                widget.configure(foreground="#a15c00")
+            if key == "flag" and lead.flag:
                 widget.configure(foreground="#a15c00")
 
     def toggle_disabled(self, lead_id: int):
@@ -629,6 +666,28 @@ class LeadsApp:
             messagebox.showinfo("Backup complete", f"Uploaded to S3 as {message}.")
         else:
             messagebox.showerror("Backup failed", message)
+
+    # ---------- career pages CSV export ----------
+
+    def _export_career_pages_csv(self):
+        with Session(self.engine) as session:
+            query = session.query(Lead).filter(Lead.processed.is_(True))
+
+            profile_choice = self.profile_filter.get()
+            if profile_choice and profile_choice != ALL_PROFILES_LABEL:
+                profile_id = self._profile_id_by_email.get(profile_choice)
+                if profile_id is not None:
+                    query = query.filter(Lead.profile_id == profile_id)
+
+            leads = query.order_by(Lead.id.asc()).all()
+            out_path = Path(__file__).resolve().parent / "leads.csv"
+            with open(out_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["name", "description", "ranking", "career_page"])
+                for lead in leads:
+                    writer.writerow([lead.name, lead.description, lead.ranking, lead.career_page])
+
+        messagebox.showinfo("Career Pages exported", f"Wrote {len(leads)} row(s) to {out_path}.")
 
     # ---------- detail panel plumbing ----------
 
@@ -683,21 +742,30 @@ class LeadsApp:
             add_combo(4, "Category", "category", CATEGORIES)
             add_entry(5, "Ranking (1-10)", "ranking", width=6)
             add_entry(6, "Website", "website")
-            add_entry(7, "Email", "email")
-            add_entry(8, "Subject", "subject")
-            add_text(9, "Body", "body", height=6)
-            add_entry(10, "Times contacted", "times_contacted", width=6)
+            add_entry(7, "Career page", "career_page")
+            add_entry(8, "Email", "email")
+            add_entry(9, "Subject", "subject")
+            add_text(10, "Body", "body", height=6)
+            add_entry(11, "Times contacted", "times_contacted", width=6)
 
-            ttk.Label(panel, text="Disabled").grid(row=11, column=0, sticky="ne", padx=6, pady=4)
+            ttk.Label(panel, text="Disabled").grid(row=12, column=0, sticky="ne", padx=6, pady=4)
             disabled_var = tk.BooleanVar(value=lead.disabled)
-            ttk.Checkbutton(panel, variable=disabled_var).grid(row=11, column=1, sticky="w", padx=6, pady=4)
+            ttk.Checkbutton(panel, variable=disabled_var).grid(row=12, column=1, sticky="w", padx=6, pady=4)
             fields["disabled"] = disabled_var
 
+            ttk.Label(panel, text="Flag").grid(row=13, column=0, sticky="ne", padx=6, pady=4)
+            flag_var = tk.BooleanVar(value=lead.flag)
+            flag_row = ttk.Frame(panel)
+            flag_row.grid(row=13, column=1, sticky="w", padx=6, pady=4)
+            ttk.Radiobutton(flag_row, text="Yes", variable=flag_var, value=True).pack(side="left")
+            ttk.Radiobutton(flag_row, text="No", variable=flag_var, value=False).pack(side="left", padx=(12, 0))
+            fields["flag"] = flag_var
+
             verify_status = ttk.Label(panel, text="", foreground="#a15c00", wraplength=420, justify="left")
-            verify_status.grid(row=13, column=0, columnspan=2, padx=6)
+            verify_status.grid(row=15, column=0, columnspan=2, padx=6)
 
             btn_row = ttk.Frame(panel)
-            btn_row.grid(row=12, column=0, columnspan=2, pady=10)
+            btn_row.grid(row=14, column=0, columnspan=2, pady=10)
             ttk.Button(btn_row, text="Save", command=lambda: self._save_edit(lead_id, fields)).pack(
                 side="left", padx=6
             )
@@ -734,11 +802,13 @@ class LeadsApp:
             lead.category = fields["category"].get().strip()
             lead.ranking = ranking
             lead.website = fields["website"].get().strip()
+            lead.career_page = fields["career_page"].get().strip()
             lead.email = fields["email"].get().strip()
             lead.subject = fields["subject"].get().strip()
             lead.body = fields["body"].get("1.0", "end").strip()
             lead.times_contacted = times_contacted
             lead.disabled = fields["disabled"].get()
+            lead.flag = fields["flag"].get()
             session.commit()
 
         self.refresh()
@@ -820,30 +890,31 @@ class LeadsApp:
             add_readonly(2, "Ranking", lead.ranking)
             add_readonly(3, "Description", lead.description)
             add_readonly(4, "Website", lead.website)
-            add_readonly(5, "Times contacted", lead.times_contacted)
-            add_readonly(6, "Status", "Disabled" if lead.disabled else "Active")
-            add_readonly(7, "Sending as", from_email)
+            add_readonly(5, "Career page", lead.career_page)
+            add_readonly(6, "Times contacted", lead.times_contacted)
+            add_readonly(7, "Status", "Disabled" if lead.disabled else "Active")
+            add_readonly(8, "Sending as", from_email)
 
-            ttk.Label(panel, text="Email").grid(row=8, column=0, sticky="ne", padx=6, pady=4)
+            ttk.Label(panel, text="Email").grid(row=9, column=0, sticky="ne", padx=6, pady=4)
             email_entry = ttk.Entry(panel, width=60)
             email_entry.insert(0, lead.email)
-            email_entry.grid(row=8, column=1, sticky="w", padx=6, pady=4)
+            email_entry.grid(row=9, column=1, sticky="w", padx=6, pady=4)
 
-            ttk.Label(panel, text="Subject").grid(row=9, column=0, sticky="ne", padx=6, pady=4)
+            ttk.Label(panel, text="Subject").grid(row=10, column=0, sticky="ne", padx=6, pady=4)
             subject_entry = ttk.Entry(panel, width=60)
             subject_entry.insert(0, lead.subject)
-            subject_entry.grid(row=9, column=1, sticky="w", padx=6, pady=4)
+            subject_entry.grid(row=10, column=1, sticky="w", padx=6, pady=4)
 
-            ttk.Label(panel, text="Body").grid(row=10, column=0, sticky="ne", padx=6, pady=4)
+            ttk.Label(panel, text="Body").grid(row=11, column=0, sticky="ne", padx=6, pady=4)
             body_text = tk.Text(panel, width=60, height=8, wrap="word")
             body_text.insert("1.0", lead.body)
-            body_text.grid(row=10, column=1, sticky="w", padx=6, pady=4)
+            body_text.grid(row=11, column=1, sticky="w", padx=6, pady=4)
 
             status_label = ttk.Label(panel, text="", foreground="#a15c00")
-            status_label.grid(row=11, column=0, columnspan=2)
+            status_label.grid(row=12, column=0, columnspan=2)
 
             btn_row = ttk.Frame(panel)
-            btn_row.grid(row=12, column=0, columnspan=2, pady=10)
+            btn_row.grid(row=13, column=0, columnspan=2, pady=10)
             send_btn = ttk.Button(
                 btn_row,
                 text="Send",
@@ -852,7 +923,40 @@ class LeadsApp:
                 ),
             )
             send_btn.pack(side="left", padx=6)
+            preview_btn = ttk.Button(
+                btn_row,
+                text="Send Preview to Self",
+                command=lambda: self._send_preview(
+                    from_email, subject_entry, body_text, status_label, preview_btn
+                ),
+            )
+            preview_btn.pack(side="left", padx=6)
             ttk.Button(btn_row, text="Cancel", command=self.close_detail_panel).pack(side="left", padx=6)
+
+    def _send_preview(self, from_email, subject_entry, body_text, status_label, preview_btn):
+        subject = subject_entry.get().strip()
+        body = body_text.get("1.0", "end").strip()
+
+        if not subject or not body:
+            messagebox.showerror("Missing content", "Subject and body can't be empty.")
+            return
+
+        preview_btn.config(state="disabled")
+        status_label.config(text="Sending preview…")
+        self.root.update_idletasks()
+
+        try:
+            send_email_via_gmail(from_email, from_email, f"[PREVIEW] {subject}", body)
+        except Exception as e:
+            status_label.config(text="")
+            messagebox.showerror("Preview send failed", f"The preview email was NOT sent.\n\n{e}")
+            return
+        finally:
+            preview_btn.config(state="normal")
+
+        status_label.config(text="")
+        note = " (dry run — not actually sent)" if DRY_RUN else ""
+        messagebox.showinfo("Preview sent", f"Preview email sent to {from_email}{note}.")
 
     def _send(self, lead_id, from_email, email_entry, subject_entry, body_text, status_label, send_btn):
         to_addr = email_entry.get().strip()

@@ -4,10 +4,10 @@ I came across **{Company Name}** and was impressed by {specific detail pulled fr
 
 We're a small, US-based team offering:
 
-- **Full-stack development** — Java, Python, Spring, Node.js, and AWS
-- **Cloud migrations & serverless architecture** built to scale without a rewrite
-- **Graphic & UX design** to match
-- **Ongoing post-launch support** — we don't disappear after hand-off
+- **Full-stack development** — Including Java, Python, Node.js, React, AI and AWS
+- **Cloud architecture** — Building robust, scalable systems on AWS and Kubernetes
+- **Graphic & UX design** — Creating high-impact visual interfaces
+- **Ongoing post-launch support** — We ensure your systems remain maintainable long after deployment
 
 We work on a **1099 contract basis** with **discounted bill rates** for the right-fit engagements, and being US-based keeps things simple — no international vendor complexity, straightforward IRS-compliant contracting.
 

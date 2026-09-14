@@ -17,12 +17,16 @@ linkedin_import.py after a scrape, from any other source -- this:
      generic info@/contact@ address found via search when no named contact
      can be confirmed. The email field is always in standard email-address
      form -- never a "Contact Us" page URL.
-  3. Scores the company 1-10 on how likely it is to need Succinct Solutions'
+  3. Searches (same Gemini web-search grounding) for the company's own
+     careers/jobs page -- where a candidate could apply -- stored in
+     `career_page` verbatim as found, never guessed/constructed. Null if
+     none can be confirmed via search.
+  4. Scores the company 1-10 on how likely it is to need Succinct Solutions'
      services (full-stack dev + graphic design, 1099 contract work), and
      tags it with an industry category from db.CATEGORIES.
-  4. Drafts a short, tailored cold-outreach email (subject + Markdown-formatted
+  5. Drafts a short, tailored cold-outreach email (subject + Markdown-formatted
      body), following the style/structure of email_example.md.
-  5. Writes the results back onto that same row and sets processed=True.
+  6. Writes the results back onto that same row and sets processed=True.
 
 Results are stored in the SQLite database (one table, "leads") via the
 SQLAlchemy ORM model defined in db.py -- import from there (not from this
@@ -305,6 +309,39 @@ def find_website(client: genai.Client, company: dict) -> tuple[Optional[str], Op
     return f"https://{domain}", domain
 
 
+class CareerPageMatch(BaseModel):
+    career_page_url: Optional[str] = Field(
+        None,
+        description="The direct URL of this company's own careers/jobs page "
+        "-- a page where a candidate could actually apply for a job (e.g. a "
+        "'/careers' or '/jobs' page on the company's own site, or their "
+        "listing on an ATS like Greenhouse, Lever, or Workday if that's how "
+        "they post openings). Null if no such page can be confirmed via "
+        "search.",
+    )
+
+
+def find_career_page(client: genai.Client, company: dict, domain: Optional[str]) -> Optional[str]:
+    """Grounded Gemini web search for this company's careers/jobs page --
+    where a job applicant would go to apply, not the general homepage. Never
+    guesses a URL pattern (e.g. domain + "/careers") -- only reports a URL it
+    actually finds via search, same fail-soft behavior as find_website/
+    find_contact.
+    """
+    site_hint = f" (website: {domain})" if domain else ""
+    prompt = (
+        f"Company: {company['company name']}{site_hint} ({company['city']}, {company['state']})\n\n"
+        "Search the web and find this company's careers/jobs page -- the page "
+        "where someone could apply for a job there. This may be on the "
+        "company's own website (e.g. a /careers or /jobs page) or on a "
+        "third-party applicant-tracking site (Greenhouse, Lever, Workday, "
+        "etc.) if that's how they list openings. Only report a URL you "
+        "actually find via search -- never guess or construct one."
+    )
+    result = _grounded_structured(client, prompt, CareerPageMatch, CareerPageMatch())
+    return result.career_page_url or None
+
+
 def generate_email_permutations(full_name: str, domain: str) -> list[str]:
     """Every plausible corporate email pattern for a person's name at a
     given domain (first.last@, flast@, etc.) -- used as a fallback guess
@@ -454,6 +491,7 @@ def process_company(client: genai.Client, write_llm: ChatOpenAI, company: dict, 
 
     website, domain = find_website(client, company)
     contact = find_contact(client, company, domain, profile.decision_maker)
+    career_page = find_career_page(client, company, domain)
 
     if contact.contact_email:
         email = contact.contact_email
@@ -472,6 +510,7 @@ def process_company(client: genai.Client, write_llm: ChatOpenAI, company: dict, 
         "ranking": assessment.ranking,
         "category": assessment.category,
         "website": website or "",
+        "career_page": career_page or "",
         "email": email,
         "subject": assessment.subject,
         "body": assessment.body,
@@ -530,6 +569,7 @@ def process_unprocessed_leads(
             lead.ranking = row["ranking"]
             lead.category = row["category"]
             lead.website = row["website"]
+            lead.career_page = row["career_page"]
             lead.email = row["email"]
             lead.subject = row["subject"]
             lead.body = row["body"]

@@ -111,6 +111,7 @@ class Lead(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     ranking: Mapped[int] = mapped_column(Integer, default=1)
     website: Mapped[str] = mapped_column(String, default="")
+    career_page: Mapped[str] = mapped_column(String, default="")
     email: Mapped[str] = mapped_column(String, default="")
     category: Mapped[str] = mapped_column(String, default="")
     subject: Mapped[str] = mapped_column(String, default="")
@@ -118,6 +119,7 @@ class Lead(Base):
     times_contacted: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     disabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     processed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    flag: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     profile_id: Mapped[Optional[int]] = mapped_column(ForeignKey("profiles.id"), nullable=True)
 
     profile: Mapped[Optional["Profile"]] = relationship(back_populates="leads")
@@ -183,6 +185,8 @@ def get_engine(db_path: str = DEFAULT_DB, force: bool = False):
     _add_column_if_missing(engine, "leads", "processed", "BOOLEAN", backfill_true=True)
     _add_column_if_missing(engine, "leads", "category", "TEXT", backfill_true=False, default_sql="''")
     _add_column_if_missing(engine, "leads", "profile_id", "INTEGER", backfill_true=False, default_sql="NULL")
+    _add_column_if_missing(engine, "leads", "career_page", "TEXT", backfill_true=False, default_sql="''")
+    _add_column_if_missing(engine, "leads", "flag", "BOOLEAN", backfill_true=False, default_sql="0")
     _add_column_if_missing(engine, "lead_runs", "profile_id", "INTEGER", backfill_true=False, default_sql="NULL")
     return engine
 
