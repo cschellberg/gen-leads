@@ -1,0 +1,4 @@
+- **Full-stack development** — Including Java, Python, Node.js, React, AI and AWS
+- **Cloud architecture** — Building robust, scalable systems on AWS and Kubernetes
+- **Graphic & UX design** — Creating high-impact visual interfaces
+- **Post-launch support** — We ensure your systems remain maintainable long after deployment
